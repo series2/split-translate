@@ -1,0 +1,254 @@
+:root {
+  --bg: #f6f7f9;
+  --pane: #ffffff;
+  --text: #1f2328;
+  --muted: #6b7280;
+  --border: #d9dde3;
+  --accent: #2563eb;
+  --err: #d93025;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --pane: #1c1f24;
+    --text: #e6e8eb;
+    --muted: #9aa3af;
+    --border: #2f343b;
+    --accent: #7aa2ff;
+    --err: #ff7b72;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--pane);
+  color: var(--text);
+  font: 15px/1.75 -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Segoe UI', 'Noto Sans JP', sans-serif;
+}
+
+/* ---- ツールバー ---- */
+.bar {
+  position: relative;
+  flex: none;
+  padding: 5px 10px 4px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.bar .row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 8px;
+  min-width: 0;
+}
+
+.bar .row + .row {
+  margin-top: 4px;
+}
+
+#page-title {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+#page-title:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.bar label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.bar select,
+.bar button {
+  font: inherit;
+  color: var(--text);
+  background: var(--pane);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+.bar button {
+  cursor: pointer;
+}
+
+.bar button:hover {
+  border-color: var(--accent);
+}
+
+.status {
+  color: var(--muted);
+}
+
+.progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.progress.active {
+  opacity: 1;
+}
+
+.progress > div {
+  width: 0;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s;
+}
+
+/* ---- 通知・接続設定 ---- */
+.notice {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--err);
+  border-radius: 6px;
+  color: var(--err);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.settings {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.settings summary {
+  cursor: pointer;
+}
+
+.settings label {
+  display: flex;
+  margin-top: 4px;
+}
+
+.settings label.col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.settings input,
+.settings select,
+.settings textarea {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--pane);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+
+.settings textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+#cfg-refresh-models {
+  flex: none;
+  font: inherit;
+  color: var(--text);
+  background: var(--pane);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+#cfg-refresh-models:hover {
+  border-color: var(--accent);
+}
+
+.settings .hint {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.settings-actions button {
+  font: inherit;
+  color: var(--text);
+  background: var(--pane);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.4;
+}
+
+#cfg-add {
+  margin-left: auto;
+}
+
+.settings-actions button:hover {
+  border-color: var(--accent);
+}
+
+#cfg-delete {
+  color: var(--err);
+  border-color: var(--err);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* ---- 翻訳ペイン（元ページの複製） ---- */
+#frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  background: #fff; /* 複製先ページの背景が透明でも読めるように */
+}
+
+.empty {
+  padding: 40px 24px;
+  color: var(--muted);
+  text-align: center;
+  line-height: 1.8;
+  white-space: pre-wrap;
+}

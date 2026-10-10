@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Split Translate</title>
+    <link rel="stylesheet" href="viewer.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="row">
+        <a id="page-title" target="_blank" rel="noopener"></a>
+      </div>
+      <div class="row controls">
+        <label>翻訳先
+          <select id="tl"></select>
+        </label>
+        <label>モデル設定
+          <select id="profile"></select>
+        </label>
+        <label class="check"><input type="checkbox" id="sync" checked />スクロール同期</label>
+        <button id="pause" type="button">一時停止</button>
+        <button id="retry" type="button">再翻訳</button>
+      </div>
+      <div class="row">
+        <span id="status" class="status" aria-live="polite"></span>
+      </div>
+      <div id="notice" class="notice" role="alert" hidden></div>
+      <details class="settings">
+        <summary>モデル設定を編集</summary>
+        <label>名前 <input id="cfg-name" type="text" spellcheck="false" /></label>
+        <label>プロバイダー
+          <select id="cfg-provider">
+            <option value="ollama">Ollama（ローカル）</option>
+            <option value="openai">OpenAI互換API</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+        </label>
+        <label>URL <input id="cfg-url" type="text" spellcheck="false" /></label>
+        <label id="cfg-key-row">APIキー <input id="cfg-key" type="password" spellcheck="false" autocomplete="off" /></label>
+        <label>モデル
+          <input id="cfg-model" type="text" spellcheck="false" list="cfg-model-list" />
+          <button id="cfg-refresh-models" type="button" title="Ollamaのインストール済みモデル一覧を取得">🔄</button>
+        </label>
+        <datalist id="cfg-model-list"></datalist>
+        <label class="col">翻訳指示（テンプレート）
+          <textarea id="cfg-template" rows="4" spellcheck="false"></textarea>
+        </label>
+        <p class="hint" id="cfg-hint"></p>
+        <div class="settings-actions">
+          <button id="cfg-update" type="button">更新</button>
+          <button id="cfg-delete" type="button">削除</button>
+          <button id="cfg-add" type="button">新規モデル設定として追加</button>
+        </div>
+      </details>
+      <div id="progress" class="progress"><div></div></div>
+    </header>
+
+    <div id="empty" class="empty"></div>
+    <!-- 元ページの複製。スクリプトは動かさず（sandbox）、CSS・画像はそのまま表示する。
+         allow-same-origin: パネル側から DOM を書き換えるために必要 / allow-popups: リンクを新しいタブで開く -->
+    <iframe id="frame" title="翻訳文" hidden
+      sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+
+    <script src="translate.js"></script>
+    <script src="compose.js"></script>
+    <script src="scrollsync.js"></script>
+    <script src="viewer.js"></script>
+  </body>
+</html>

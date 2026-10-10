@@ -1,0 +1,975 @@
+'use strict';
+
+// サイドパネル（翻訳側）。原文はアクティブタブのページそのもの。
+// 右側（このパネル）は、ページの複製（CSS・画像・リンクつき）の本文ブロックを訳文に差し替えたもの。
+//   - 複製は content.js が作り、iframe(sandbox, スクリプト無効) に読み込む
+//   - 翻訳は Ollama（ローカル）/ OpenAI 互換API / Anthropic から選べる。複数の設定を保存して切り替えられる
+//   - 訳文の構造復元は compose.js
+//   - content.js とメッセージで「ホバー中のブロック」「スクロール位置」を同期する
+
+// ---------------------------------------------------------------------------
+// 定数
+// ---------------------------------------------------------------------------
+// value は翻訳先として渡す出力言語名。
+const LANGS = [
+  ['Japanese', '日本語'],
+  ['English', 'English'],
+  ['Chinese', '中国語（実験的）'],
+  ['Korean', '韓国語（実験的）'],
+  ['French', 'フランス語（実験的）'],
+  ['German', 'ドイツ語（実験的）'],
+  ['Spanish', 'スペイン語（実験的）'],
+  ['Italian', 'イタリア語（実験的）'],
+  ['Russian', 'ロシア語（実験的）'],
+  ['Arabic', 'アラビア語（実験的）'],
+  ['Thai', 'タイ語（実験的）'],
+  ['Vietnamese', 'ベトナム語（実験的）'],
+  ['Indonesian', 'インドネシア語（実験的）'],
+];
+// プロバイダーごとの既定値。モデル設定を新規作成/プロバイダー切替したときに使う。
+const PROVIDER_DEFAULTS = {
+  ollama: { label: 'Ollama', url: 'http://localhost:11434', model: 'mitmul/plamo-2-translate' },
+  openai: { label: 'OpenAI', url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  anthropic: { label: 'Anthropic', url: 'https://api.anthropic.com', model: 'claude-haiku-4-5-20251001' },
+};
+const CONCURRENCY = 2;
+const MAX_CACHE_ENTRIES = 4000;
+
+// 複製の中に差し込むスタイル（ホバー・状態表示・再翻訳ボタン）
+const FRAME_CSS = `
+[data-st-hl]{background-color:rgba(250,204,21,.4)!important;outline:2px solid rgba(234,179,8,.9)!important;outline-offset:2px!important;border-radius:3px}
+[data-st-state=pending],[data-st-state=busy]{opacity:.55!important}
+[data-st-state=error]{outline:2px dashed #d93025!important;outline-offset:2px!important;cursor:pointer!important}
+#st-retry{all:initial;position:fixed;z-index:2147483647;display:none;width:24px;height:24px;font:15px/22px sans-serif;text-align:center;color:#555;background:#fff;border:1px solid #bbb;border-radius:6px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+#st-retry:hover{color:#2563eb;border-color:#2563eb}
+`;
+
+// ---------------------------------------------------------------------------
+// 状態・DOM
+// ---------------------------------------------------------------------------
+const $ = (sel) => document.querySelector(sel);
+const frame = $('#frame');
+const emptyEl = $('#empty');
+const titleEl = $('#page-title');
+const selTl = $('#tl');
+const chkSync = $('#sync');
+const statusEl = $('#status');
+const noticeEl = $('#notice');
+const progressEl = $('#progress');
+const btnPause = $('#pause');
+const selProfile = $('#profile');
+const inName = $('#cfg-name');
+const selProvider = $('#cfg-provider');
+const inUrl = $('#cfg-url');
+const inKey = $('#cfg-key');
+const inModel = $('#cfg-model');
+const modelList = $('#cfg-model-list');
+const btnRefreshModels = $('#cfg-refresh-models');
+const inTemplate = $('#cfg-template');
+const rowKey = $('#cfg-key-row');
+const cfgHint = $('#cfg-hint');
+const btnUpdate = $('#cfg-update');
+const btnAdd = $('#cfg-add');
+const btnDelete = $('#cfg-delete');
+
+inTemplate.placeholder = STTranslate.DEFAULT_TEMPLATE;
+
+const { translate, checkBackend: apiCheckBackend } = STTranslate;
+const C = PlamoCompose;
+
+let tabId = null; // このパネルが紐づくタブ（?tab= で渡される）
+let doc = null;
+let run = 0; // 再翻訳・別ページへの切替時に古いワーカーを止めるための世代番号
+let anchor = 0; // いま見ているブロック。ここに近い順に翻訳する
+let curStore = []; // 現在の訳（index = ブロック番号。parts は C.SEP 区切り / marks は「」付き）
+let stateArr = []; // 'pending' | 'done' | 'error' | 'busy'
+let translating = false; // translateAll() のワーカーが実際に動いている間だけ true
+let paused = false; // true の間は、ホバー/スクロールなどによる自動再開（resumeIfIdle）を行わない
+let profiles = []; // 保存されたモデル設定 [{ id, name, provider, url, apiKey, model }]
+let activeProfileId = null;
+const stores = new Map(); // `${docId}|${profileId}|${lang}` -> string[]
+const textCache = new Map(); // `${profileId}|${lang}|${原文}` -> 訳（再抽出・パネルの開き直しをまたいで使い回す）
+
+// 複製（iframe）側
+let frameToken = 0;
+let ready = false; // DOM が使える（ブロックを差し替えられる）
+let frameLoaded = false; // CSS・画像まで読み込み済み（固定要素の判定が正しくなる）
+let fdoc = null;
+let fwin = null;
+let els = []; // 複製内のブロック要素（index = ブロック番号）
+let origNodes = []; // 各ブロックの元の子ノード（差し替え前に退避）
+let retryBtn = null;
+let fMainScroller = null; // 複製内で実際にスクロールしている要素（null = フレーム自体がスクロールする）
+let fSyncable = []; // スクロール位置合わせに使えるブロックか（ScrollSync.detect の結果。index = ブロック番号）
+let scrollerReady = false; // fMainScroller を検出済みか
+
+function activeProfile() {
+  return profiles.find((p) => p.id === activeProfileId) || profiles[0] || null;
+}
+
+const cfg = () => {
+  const p = activeProfile();
+  if (!p) return { provider: 'ollama', url: PROVIDER_DEFAULTS.ollama.url, apiKey: '', model: PROVIDER_DEFAULTS.ollama.model, template: '' };
+  return { provider: p.provider, url: p.url.replace(/\/+$/, ''), apiKey: p.apiKey, model: p.model, template: p.template };
+};
+
+// ---------------------------------------------------------------------------
+// 翻訳バックエンド（通信・翻訳ロジックは translate.js）
+// ---------------------------------------------------------------------------
+function explain(err) {
+  const { provider, url, model } = cfg();
+  if (provider === 'ollama') {
+    switch (err.code) {
+      case 'network':
+        return (
+          `Ollama（${url}）に接続できません。\n` +
+          '・起動しているか確認してください: launchctl print gui/$(id -u)/local.ollama\n' +
+          '・Docker 版の場合は 11434 番ポートを公開してください'
+        );
+      case 'forbidden':
+        return (
+          'Ollama が拡張機能からのアクセスを拒否しました（403）。\n' +
+          'Ollama の環境変数 OLLAMA_ORIGINS に chrome-extension://* を含めて再起動してください。\n' +
+          '（Docker の場合は -e OLLAMA_ORIGINS="chrome-extension://*"）'
+        );
+      case 'model':
+        return `モデル ${model} が見つかりません。次を実行して取得してください:\nollama pull ${model}`;
+      case 'runaway':
+        return '訳の生成が止まらなくなったため、この文の翻訳に失敗しました。↻ で再試行してください。';
+      default:
+        return String(err?.message || err);
+    }
+  }
+  const providerName = provider === 'openai' ? 'OpenAI互換API' : 'Anthropic API';
+  switch (err.code) {
+    case 'network':
+      return (
+        `${providerName}（${url}）に接続できません。\n` +
+        '・URL が正しいか確認してください\n' +
+        '・この接続先への拡張機能からのアクセスが許可されているか確認してください（モデル設定のURL欄を保存し直すと許可を求められます）'
+      );
+    case 'forbidden':
+      return `${providerName}がAPIキーを拒否しました。キーが正しいか、利用枠が残っているか確認してください。`;
+    case 'model':
+      return `モデル ${model} が見つかりません。モデル名が正しいか確認してください。`;
+    default:
+      return String(err?.message || err);
+  }
+}
+
+const checkBackend = () => apiCheckBackend(cfg());
+const translateText = (text, lang, temperature = 0) => translate(text, lang, { ...cfg(), temperature });
+
+/** 原文（キャッシュのキー）。parts は要素ごとの原文を区切り文字でつなぐ。 */
+function sourceOf(b) {
+  if (b.m === 'parts') return b.parts.join(C.SEP);
+  if (b.m === 'marks') return b.marked;
+  return b.text;
+}
+
+/** 1 ブロックを訳す。構造の復元に必要な形（parts / 「」付き）で返す。 */
+async function translateBlockAt(i, lang, temperature = 0) {
+  const b = doc.blocks[i];
+  if (b.m === 'parts') {
+    const outs = [];
+    for (const part of b.parts) outs.push(await translateText(part, lang, temperature));
+    return outs.join(C.SEP);
+  }
+  if (b.m === 'marks' && lang === 'Japanese') {
+    // リンクなどを「」で囲んだ原文を訳す。「」が崩れたら温度を変えて 1 回だけやり直す
+    for (const t of [temperature, temperature === 0 ? 0.4 : 0]) {
+      const raw = await translateText(b.marked, lang, t);
+      if (C.applyMarks(raw, b.markCount, b.text)) return raw;
+    }
+  }
+  return translateText(b.text, lang, temperature);
+}
+
+// ---------------------------------------------------------------------------
+// 翻訳キャッシュ
+// ---------------------------------------------------------------------------
+const tkey = (profileId, lang, text) => `${profileId}|${lang}|${text}`;
+
+let persistTimer = null;
+function persistCache() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    if (!doc) return;
+    const entries = [...textCache].slice(-MAX_CACHE_ENTRIES);
+    chrome.storage.session.set({ [`tr:${tabId}`]: entries }).catch(() => {});
+  }, 600);
+}
+
+async function restoreCache() {
+  const key = `tr:${tabId}`;
+  const entries = (await chrome.storage.session.get(key))[key] || [];
+  for (const [k, val] of entries) if (!textCache.has(k)) textCache.set(k, val);
+}
+
+/** 訳を記録する。profileId / lang は翻訳を始めた時点のもの（実行中に設定が変わっても混ざらない）。 */
+function remember(store, i, text, profileId, lang) {
+  store[i] = text;
+  textCache.set(tkey(profileId, lang, sourceOf(doc.blocks[i])), text);
+  persistCache();
+}
+
+function currentStore(force) {
+  const profileId = activeProfileId;
+  const lang = selTl.value;
+  const key = `${doc.id}|${profileId}|${lang}`;
+  if (force) {
+    stores.delete(key);
+    for (const b of doc.blocks) textCache.delete(tkey(profileId, lang, sourceOf(b)));
+  }
+  if (!stores.has(key)) stores.set(key, doc.blocks.map((b) => textCache.get(tkey(profileId, lang, sourceOf(b)))));
+  return stores.get(key);
+}
+
+// ---------------------------------------------------------------------------
+// 表示（ツールバー）
+// ---------------------------------------------------------------------------
+function setNotice(message) {
+  noticeEl.hidden = !message;
+  noticeEl.textContent = message || '';
+}
+
+function showEmpty(message) {
+  doc = null;
+  run++;
+  frameToken++;
+  ready = false;
+  frame.hidden = true;
+  frame.removeAttribute('srcdoc');
+  emptyEl.hidden = false;
+  emptyEl.textContent = message;
+  titleEl.textContent = '';
+  titleEl.removeAttribute('href');
+  statusEl.textContent = '';
+  setNotice('');
+  progressEl.classList.remove('active');
+}
+
+function setStatus(done, total, failed) {
+  progressEl.firstElementChild.style.width = `${total ? (done / total) * 100 : 0}%`;
+  progressEl.classList.toggle('active', done < total);
+  if (done < total) statusEl.textContent = `翻訳中 ${done}/${total}`;
+  else statusEl.textContent = failed ? `完了（失敗 ${failed}）` : `完了 ${total} ブロック`;
+}
+
+// ---------------------------------------------------------------------------
+// 複製（iframe）の読み込みと描画
+// ---------------------------------------------------------------------------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function loadFrame() {
+  const token = ++frameToken;
+  ready = false;
+  frameLoaded = false;
+  fMainScroller = null;
+  fSyncable = [];
+  scrollerReady = false;
+  frame.hidden = true;
+  emptyEl.hidden = false;
+  emptyEl.textContent = 'ページの複製を読み込み中…';
+
+  let html;
+  try {
+    const res = await chrome.tabs.sendMessage(tabId, { type: 'snapshot', docId: doc.id });
+    html = res?.html;
+    if (!html) throw new Error(res?.error || 'empty');
+  } catch (err) {
+    if (token !== frameToken) return;
+    emptyEl.textContent = 'ページの複製を取得できませんでした。\nページを再読み込みしてから、もう一度アイコンをクリックしてください。';
+    console.warn('snapshot failed', err);
+    return;
+  }
+  if (token !== frameToken) return;
+  frame.srcdoc = html;
+
+  // DOM が使えるようになったら（画像や CSS の完了を待たずに）準備する
+  for (let k = 0; k < 200 && token === frameToken; k++) {
+    await sleep(100);
+    let d;
+    try {
+      d = frame.contentDocument;
+    } catch {
+      continue;
+    }
+    if (d && d.readyState !== 'loading' && d.querySelector('[data-st-i]')) {
+      onFrameReady(token);
+      return;
+    }
+  }
+  if (token === frameToken) {
+    emptyEl.textContent = 'ページの複製の読み込みがタイムアウトしました。\n再翻訳ボタンを押して、もう一度お試しください。';
+  }
+}
+
+frame.addEventListener('load', () => {
+  try {
+    if (frame.contentDocument?.querySelector('[data-st-i]')) {
+      frameLoaded = true;
+      ensureMainScroller();
+    }
+  } catch {
+    /* 別の文書 */
+  }
+});
+
+/**
+ * 複製（iframe）内で実際にスクロールしている要素を検出する（ScrollSync.detect、content.js と共通）。
+ * ページ本体（body/html）が overflow:hidden で、内部の専用コンテナがスクロールするタイプのサイトでは、
+ * fwin 自体はスクロールしないため、この要素を見つけて使わないと追従しない。
+ * CSS が効いていないと誤判定するので、frameLoaded（iframe の load イベント）後にのみ実行する。
+ */
+function ensureMainScroller() {
+  if (scrollerReady || !frameLoaded || !els.length) return;
+  scrollerReady = true;
+  ({ mainScroller: fMainScroller, syncable: fSyncable } = ScrollSync.detect(fdoc, fwin, els));
+}
+
+const fScrollTop0 = () => (fMainScroller ? fMainScroller.getBoundingClientRect().top : 0);
+
+function onFrameReady(token) {
+  if (token !== frameToken || ready) return;
+  fdoc = frame.contentDocument;
+  fwin = frame.contentWindow;
+  els = [];
+  origNodes = [];
+  fdoc.querySelectorAll('[data-st-i]').forEach((el) => {
+    els[Number(el.getAttribute('data-st-i'))] = el;
+  });
+  els.forEach((el, i) => {
+    if (el) origNodes[i] = [...el.childNodes];
+  });
+
+  const style = fdoc.createElement('style');
+  style.textContent = FRAME_CSS;
+  fdoc.head.append(style);
+  retryBtn = fdoc.createElement('button');
+  retryBtn.id = 'st-retry';
+  retryBtn.type = 'button';
+  retryBtn.title = 'この文を再翻訳';
+  retryBtn.textContent = '↻';
+  fdoc.body.append(retryBtn);
+
+  attachFrameListeners();
+  ready = true;
+  emptyEl.hidden = true;
+  frame.hidden = false;
+  paintAll();
+}
+
+/** 訳を差し込んだ Node 列。複製とページで構造が食い違っていたら、構造は復元せず文字だけにする。 */
+function renderNodes(i) {
+  const raw = curStore[i];
+  const b = doc.blocks[i];
+  const plain = () => [fdoc.createTextNode(C.plainText(raw, b.m, b.markCount, b.text))];
+  try {
+    if (JSON.stringify(C.plan(origNodes[i]).wraps) !== JSON.stringify(b.w)) return plain();
+    return C.compose(origNodes[i], raw, fdoc);
+  } catch (err) {
+    console.warn('compose failed', i, err);
+    return plain();
+  }
+}
+
+function paint(i) {
+  const el = els[i];
+  if (!ready || !el) return;
+  const st = stateArr[i];
+  if (st === 'done') {
+    el.removeAttribute('data-st-state');
+    el.replaceChildren(...renderNodes(i));
+  } else if (st === 'busy') {
+    el.setAttribute('data-st-state', 'busy'); // 元の訳を残したまま薄く表示
+  } else {
+    el.replaceChildren(...origNodes[i]); // 訳が来るまでは元の文章（薄く）
+    el.setAttribute('data-st-state', st);
+  }
+}
+
+function paintAll() {
+  if (!ready || !doc) return;
+  fdoc.documentElement.dir = selTl.value === 'Arabic' ? 'rtl' : fdoc.documentElement.dir;
+  for (let i = 0; i < doc.blocks.length; i++) paint(i);
+}
+
+function setState(i, st) {
+  stateArr[i] = st;
+  paint(i);
+  if (hoverIdx === i) positionRetry(i);
+}
+
+// ---------------------------------------------------------------------------
+// 翻訳ジョブ
+// ---------------------------------------------------------------------------
+async function translateAll(force = false) {
+  if (!doc) return;
+  paused = false;
+  btnPause.textContent = '一時停止';
+  const my = ++run;
+  const lang = selTl.value;
+  const profileId = activeProfileId;
+  const store = currentStore(force);
+  curStore = store;
+  const total = doc.blocks.length;
+  setNotice('');
+
+  let done = 0;
+  let failed = 0;
+  const skip = new Set(); // 処理中・失敗済みのブロック
+  stateArr = store.map((t) => (t != null ? 'done' : 'pending'));
+  done = stateArr.filter((s) => s === 'done').length;
+  paintAll();
+  setStatus(done, total, failed);
+  if (done === total) return;
+
+  translating = true;
+  try {
+    try {
+      await checkBackend();
+    } catch (err) {
+      if (my !== run) return;
+      setNotice(explain(err));
+      statusEl.textContent = '翻訳できません';
+      return;
+    }
+    if (my !== run) return;
+
+    // いま見ている位置から先（→戻って手前）へ、未翻訳のブロックを 1 つ選ぶ
+    const pick = () => {
+      for (let k = 0; k < total; k++) {
+        const i = (anchor + k) % total;
+        if (store[i] == null && !skip.has(i)) return i;
+      }
+      return -1;
+    };
+
+    async function worker() {
+      for (let i = pick(); my === run && i !== -1; i = pick()) {
+        skip.add(i);
+        try {
+          const text = await translateBlockAt(i, lang);
+          if (my !== run) return; // 別のページ・言語に切り替わった
+          remember(store, i, text, profileId, lang);
+          setState(i, 'done');
+        } catch (err) {
+          if (my !== run) return;
+          console.warn('translate failed', i, err);
+          if (err.fatal) {
+            run++; // 他のワーカーも止める
+            setNotice(explain(err));
+            setState(i, 'error');
+            statusEl.textContent = '翻訳を中断しました';
+            progressEl.classList.remove('active');
+            return;
+          }
+          failed++;
+          setState(i, 'error');
+        }
+        done++;
+        setStatus(done, total, failed);
+      }
+    }
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  } finally {
+    // このジョブがまだ「現行世代」であるときだけ下ろす（新しいジョブに引き継がれていたら触らない）
+    if (my === run) translating = false;
+  }
+}
+
+/**
+ * スクロールで見ている場所（anchor）が変わったときに呼ぶ。
+ * ちょうど良いタイミングで再開できるよう、ジョブが止まっていて（完了・致命的エラーによる中断など）
+ * まだ未訳のブロックが残っていれば、キャッシュを消さずに翻訳を再開する。
+ * これがないと、致命的エラーで中断した後や全ブロックを訳し終えた後は、
+ * スクロールしても「見ている場所を優先する」仕組みが機能しなくなる（誰も pick() を呼ばなくなるため）。
+ */
+function resumeIfIdle() {
+  if (!doc || translating || paused) return;
+  if (stateArr.some((s) => s === 'pending')) translateAll();
+}
+
+/** 一時停止/再開。一時停止中は、新しいブロックの翻訳を発行しない（実行中の 1〜数件は最後まで走る）。 */
+function togglePause() {
+  if (!doc) return;
+  paused = !paused;
+  if (paused) {
+    run++; // ワーカーの pick() ループを止める（この生成の finally は my!==run になるので translating はここで自分で下ろす）
+    translating = false;
+    btnPause.textContent = '再開';
+    statusEl.textContent = '一時停止中';
+    progressEl.classList.remove('active');
+  } else {
+    resumeIfIdle();
+  }
+}
+btnPause.addEventListener('click', togglePause);
+
+const retrying = new Set();
+
+/** 1 ブロックだけ訳し直す。訳済みのブロックは毎回違う候補が出るよう temperature を上げる。 */
+async function retryBlock(i) {
+  if (retrying.has(i) || !doc) return;
+  const my = run;
+  const store = currentStore(false);
+  const lang = selTl.value;
+  const profileId = activeProfileId;
+  const hadText = store[i] != null;
+  retrying.add(i);
+  setState(i, hadText ? 'busy' : 'pending');
+  try {
+    const text = await translateBlockAt(i, lang, hadText ? 0.6 : 0);
+    if (my === run) {
+      remember(store, i, text, profileId, lang);
+      setState(i, 'done');
+    }
+  } catch (err) {
+    if (my === run) {
+      setState(i, hadText ? 'done' : 'error'); // 失敗しても元の訳は残す
+      setNotice(explain(err));
+    }
+  } finally {
+    retrying.delete(i);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ページ（原文）との連携
+// ---------------------------------------------------------------------------
+function sendToPage(msg) {
+  if (tabId == null || !doc) return;
+  chrome.tabs.sendMessage(tabId, { ...msg, docId: doc.id }).catch(() => {});
+}
+
+let hoverIdx = null;
+function setHover(i) {
+  if (hoverIdx != null) els[hoverIdx]?.removeAttribute('data-st-hl');
+  hoverIdx = i;
+  if (i == null || !els[i]) return;
+  els[i].setAttribute('data-st-hl', '');
+}
+
+function positionRetry(i) {
+  if (!retryBtn) return;
+  if (i == null || stateArr[i] !== 'done' || !els[i]) {
+    retryBtn.style.display = 'none';
+    return;
+  }
+  const r = els[i].getBoundingClientRect();
+  retryBtn.style.top = `${Math.max(2, Math.min(r.top, fwin.innerHeight - 28))}px`;
+  retryBtn.style.left = `${Math.max(2, Math.min(r.right - 26, fwin.innerWidth - 30))}px`;
+  retryBtn.style.display = 'block';
+}
+
+let driver = false; // ユーザーがこのパネルを操作しているときだけ、スクロールをページへ送る
+let rafPending = false;
+
+function attachFrameListeners() {
+  // ホバー → ページのブロックをハイライト
+  fdoc.addEventListener('mouseover', (e) => {
+    if (e.target === retryBtn) return;
+    const el = e.target.closest?.('[data-st-i]');
+    const i = el ? Number(el.getAttribute('data-st-i')) : null;
+    if (i === hoverIdx) return;
+    setHover(i);
+    positionRetry(i);
+    sendToPage({ type: 'highlight', block: i });
+    if (i != null) {
+      anchor = i;
+      resumeIfIdle();
+    }
+  });
+  fdoc.documentElement.addEventListener('mouseleave', () => {
+    if (hoverIdx == null) return;
+    setHover(null);
+    positionRetry(null);
+    sendToPage({ type: 'highlight', block: null });
+  });
+  fdoc.addEventListener(
+    'click',
+    (e) => {
+      if (e.target === retryBtn) {
+        if (hoverIdx != null) retryBlock(hoverIdx);
+        return;
+      }
+      const el = e.target.closest?.('[data-st-i]');
+      if (el && stateArr[Number(el.getAttribute('data-st-i'))] === 'error') {
+        e.preventDefault();
+        retryBlock(Number(el.getAttribute('data-st-i')));
+      }
+    },
+    true
+  );
+
+  // スクロール → 翻訳の優先位置を更新し、ページを同じブロックへ（ユーザー操作時のみ）
+  for (const ev of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
+    fdoc.addEventListener(ev, () => (driver = true), { passive: true });
+  }
+  fdoc.addEventListener(
+    'scroll',
+    () => {
+      if (rafPending || !doc) return;
+      rafPending = true;
+      requestAnimationFrame(() => {
+        rafPending = false;
+        ensureMainScroller();
+        positionRetry(hoverIdx);
+        const atEnd = fMainScroller
+          ? fMainScroller.scrollTop > 0 && fMainScroller.scrollTop + fMainScroller.clientHeight >= fMainScroller.scrollHeight - 2
+          : fwin.scrollY > 0 && Math.ceil(fwin.scrollY + fwin.innerHeight) >= fdoc.documentElement.scrollHeight - 2;
+        const top = fScrollTop0();
+        let msg = null;
+        for (let i = 0; i < els.length; i++) {
+          if (!els[i]) continue;
+          const r = els[i].getBoundingClientRect();
+          if (r.height === 0 || r.bottom <= top + 1) continue;
+          if (frameLoaded && !fSyncable[i]) continue;
+          anchor = i;
+          msg = { type: 'scrollTo', block: i, frac: Math.min(1, Math.max(0, (top - r.top) / r.height)) };
+          break;
+        }
+        if (chkSync.checked && driver && frameLoaded) sendToPage(atEnd ? { type: 'scrollTo', end: true } : msg);
+      });
+    },
+    { capture: true, passive: true }
+  );
+}
+
+// ページ側からの通知
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (!doc || sender.tab?.id !== tabId || msg.docId !== doc.id) return;
+  driver = false; // ページ主導の間は、パネルのスクロールを送り返さない
+  if (msg.type === 'hover') {
+    if (ready) {
+      setHover(msg.block);
+      positionRetry(null);
+    }
+    if (msg.block != null) {
+      anchor = msg.block;
+      resumeIfIdle();
+    }
+  } else if (msg.type === 'scroll') {
+    anchor = msg.end ? doc.blocks.length - 1 : msg.block;
+    if (!chkSync.checked || !ready) return;
+    ensureMainScroller();
+    if (msg.end) {
+      if (fMainScroller) fMainScroller.scrollTo({ top: fMainScroller.scrollHeight, behavior: 'instant' });
+      else fwin.scrollTo({ top: fdoc.documentElement.scrollHeight, behavior: 'instant' });
+    } else if (els[msg.block]) {
+      const r = els[msg.block].getBoundingClientRect();
+      const sc = fMainScroller || fwin;
+      sc.scrollBy({ top: r.top + msg.frac * r.height - fScrollTop0(), behavior: 'instant' });
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ページ（doc）の切替
+// ---------------------------------------------------------------------------
+const NO_DOC_MESSAGE =
+  'このタブはまだ翻訳されていません。\nツールバーの拡張機能アイコン（または Alt+Shift+T）をクリックしてください。';
+
+async function applyDoc(d) {
+  hoverIdx = null;
+  driver = false;
+  if (!d) {
+    showEmpty(NO_DOC_MESSAGE);
+    return;
+  }
+  doc = d;
+  curStore = [];
+  stateArr = d.blocks.map(() => 'pending');
+  titleEl.textContent = d.title || d.url;
+  titleEl.href = d.url;
+  titleEl.title = d.url;
+  await restoreCache();
+  if (doc !== d) return;
+  loadFrame();
+  translateAll();
+}
+
+async function loadDoc() {
+  const key = `doc:${tabId}`;
+  applyDoc((await chrome.storage.session.get(key))[key]);
+}
+
+// アイコンの再クリックでページが再抽出されたとき（doc が置き換わる／遷移で消える）
+chrome.storage.session.onChanged.addListener((changes) => {
+  const change = changes[`doc:${tabId}`];
+  if (change) applyDoc(change.newValue);
+});
+
+// ---------------------------------------------------------------------------
+// モデル設定（複数保存して切り替え）
+// ---------------------------------------------------------------------------
+function defaultsFor(provider) {
+  return PROVIDER_DEFAULTS[provider] || PROVIDER_DEFAULTS.ollama;
+}
+
+/** 既存と同じ名前なら "Ollama 2" のように連番を付け、新規追加しても一覧で見分けられるようにする。 */
+function uniqueProfileName(base) {
+  const existing = new Set(profiles.map((p) => p.name));
+  if (!existing.has(base)) return base;
+  let n = 2;
+  while (existing.has(`${base} ${n}`)) n++;
+  return `${base} ${n}`;
+}
+
+function makeProfile(provider) {
+  const d = defaultsFor(provider);
+  return {
+    id: crypto.randomUUID(),
+    name: uniqueProfileName(d.label),
+    provider,
+    url: d.url,
+    apiKey: '',
+    model: d.model,
+    template: STTranslate.DEFAULT_TEMPLATE,
+  };
+}
+
+function saveProfiles() {
+  return chrome.storage.local.set({ profiles, activeProfileId });
+}
+
+function populateProfileSelect() {
+  selProfile.replaceChildren(...profiles.map((p) => new Option(p.name || '(無題)', p.id)));
+  selProfile.value = activeProfileId;
+}
+
+function updateProviderVisibility(provider) {
+  rowKey.hidden = provider === 'ollama';
+  btnRefreshModels.hidden = provider !== 'ollama';
+  cfgHint.textContent =
+    provider === 'ollama'
+      ? 'モデル名に "plamo" を含む場合だけ PLaMo-2-Translate 専用の高品質な翻訳ロジックを使い、下の翻訳指示は無視されます。それ以外のモデルは、下の翻訳指示を Ollama 標準のチャットテンプレートに渡して翻訳します。'
+      : provider === 'openai'
+      ? 'OpenAI 本体のほか、Groq・OpenRouter・DeepSeek・LM Studio など /chat/completions 互換のエンドポイントを指定できます。URL は /v1 まで含めてください。'
+      : 'Anthropic の Messages API（Claude）を使います。';
+}
+
+/** Ollama にインストール済みのモデル一覧を取得し、モデル欄の候補（datalist）に反映する。 */
+async function refreshOllamaModels() {
+  const url = (inUrl.value.trim() || PROVIDER_DEFAULTS.ollama.url).replace(/\/+$/, '');
+  btnRefreshModels.disabled = true;
+  try {
+    const res = await fetch(`${url}/api/tags`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { models = [] } = await res.json();
+    modelList.replaceChildren(...models.map((m) => new Option(m.name || m.model)));
+    setNotice(models.length ? '' : `${url} にインストール済みのモデルが見つかりませんでした。`);
+  } catch (err) {
+    setNotice(`Ollama（${url}）のモデル一覧を取得できませんでした: ${err.message || err}`);
+  } finally {
+    btnRefreshModels.disabled = false;
+  }
+}
+btnRefreshModels.addEventListener('click', refreshOllamaModels);
+
+function fillEditor(p) {
+  inName.value = p.name;
+  selProvider.value = p.provider;
+  inUrl.value = p.url;
+  inKey.value = p.apiKey || '';
+  inModel.value = p.model;
+  inTemplate.value = p.template || '';
+  updateProviderVisibility(p.provider);
+}
+
+/** 編集欄の現在値を、選択中のプロファイルへ書き戻す。「更新」を押すまでは反映されない。 */
+function commitEditor() {
+  const p = activeProfile();
+  if (!p) return;
+  p.provider = selProvider.value;
+  const d = defaultsFor(p.provider);
+  p.name = inName.value.trim() || d.label;
+  p.url = inUrl.value.trim().replace(/\/+$/, '') || d.url;
+  p.apiKey = inKey.value;
+  p.model = inModel.value.trim() || d.model;
+  p.template = inTemplate.value;
+  populateProfileSelect(); // 名前の変更を一覧に反映
+  saveProfiles();
+}
+
+// -------------------------------------------------------------------------
+// ホスト権限（Ollama 以外の既定ホスト・カスタム URL は実行時に許可を求める）
+//   manifest.json の host_permissions で localhost / api.openai.com / api.anthropic.com は
+//   あらかじめ許可済み。それ以外（自前サーバー・別のクラウドプロキシ等）だけ、ユーザー操作の
+//   タイミングで chrome.permissions.request を呼ぶ（この API はユーザー操作中でないと使えない）。
+// -------------------------------------------------------------------------
+function originOf(url) {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}/*`;
+  } catch {
+    return null;
+  }
+}
+
+async function hasHostPermission(url) {
+  const origin = originOf(url);
+  if (!origin) return false;
+  try {
+    return await chrome.permissions.contains({ origins: [origin] });
+  } catch {
+    return false;
+  }
+}
+
+async function ensureHostPermission(url) {
+  const origin = originOf(url);
+  if (!origin) return false;
+  if (await hasHostPermission(url)) return true;
+  try {
+    const granted = await chrome.permissions.request({ origins: [origin] });
+    if (!granted) setNotice(`${origin} へのアクセスが許可されなかったため、翻訳できません。`);
+    return granted;
+  } catch (err) {
+    console.warn('permission request failed', err);
+    return false;
+  }
+}
+
+selProfile.addEventListener('change', async () => {
+  activeProfileId = selProfile.value;
+  fillEditor(activeProfile()); // 編集欄の下書きは捨てて、選び直したプロファイルの内容を表示する
+  await saveProfiles();
+  await ensureHostPermission(activeProfile().url);
+  translateAll(); // 強制はしない。そのプロファイルで訳し済みのキャッシュがあればそのまま使う
+});
+
+// プロバイダーを切り替えたときは、編集欄の URL/モデルがまだ既定値のままなら新しいプロバイダーの
+// 既定値に合わせる（下書きの更新のみ。保存や再翻訳は「更新」ボタンを押すまで行わない）。
+selProvider.addEventListener('change', () => {
+  const provider = selProvider.value;
+  const d = defaultsFor(provider);
+  const wasDefaultUrl = Object.values(PROVIDER_DEFAULTS).some((pd) => pd.url === inUrl.value.trim());
+  const wasDefaultModel = Object.values(PROVIDER_DEFAULTS).some((pd) => pd.model === inModel.value.trim());
+  if (wasDefaultUrl) inUrl.value = d.url;
+  if (wasDefaultModel) inModel.value = d.model;
+  updateProviderVisibility(provider);
+});
+
+/**
+ * 「更新」ボタン。編集欄の内容を選択中のプロファイルへ反映し、保存する。
+ * 強制的な全件再翻訳はしない（設定を少し変えただけで訳文が全部消えるのは煩わしいため）。
+ * モデルや指示文を変えてやり直したいときは、既存の「再翻訳」ボタンを使う。
+ */
+async function updateActiveProfile() {
+  commitEditor();
+  await ensureHostPermission(activeProfile().url);
+  translateAll();
+}
+
+btnUpdate.addEventListener('click', async () => {
+  await updateActiveProfile();
+  const original = btnUpdate.textContent;
+  btnUpdate.textContent = '更新しました ✓';
+  btnUpdate.disabled = true;
+  setTimeout(() => {
+    btnUpdate.textContent = original;
+    btnUpdate.disabled = false;
+  }, 1200);
+});
+
+/** 編集欄に今表示されている内容をそのまま新しいプロファイルにする（複製・下書きの保存）。 */
+function profileFromEditor() {
+  const provider = selProvider.value;
+  const d = defaultsFor(provider);
+  return {
+    id: crypto.randomUUID(),
+    name: uniqueProfileName(inName.value.trim() || d.label),
+    provider,
+    url: inUrl.value.trim().replace(/\/+$/, '') || d.url,
+    apiKey: inKey.value,
+    model: inModel.value.trim() || d.model,
+    template: inTemplate.value,
+  };
+}
+
+btnAdd.addEventListener('click', async () => {
+  const p = profileFromEditor();
+  profiles.push(p);
+  activeProfileId = p.id;
+  populateProfileSelect();
+  fillEditor(p);
+  await saveProfiles();
+  await ensureHostPermission(p.url);
+  inName.focus();
+  inName.select();
+  translateAll();
+});
+
+btnDelete.addEventListener('click', async () => {
+  if (profiles.length <= 1) {
+    setNotice('最後の1つのモデル設定は削除できません。');
+    return;
+  }
+  profiles = profiles.filter((p) => p.id !== activeProfileId);
+  activeProfileId = profiles[0].id;
+  populateProfileSelect();
+  fillEditor(activeProfile());
+  await saveProfiles();
+  translateAll();
+});
+
+// ---------------------------------------------------------------------------
+// 起動
+// ---------------------------------------------------------------------------
+const savePrefs = () => chrome.storage.local.set({ target: selTl.value, sync: chkSync.checked });
+
+selTl.addEventListener('change', () => (savePrefs(), translateAll()));
+chkSync.addEventListener('change', savePrefs);
+$('#retry').addEventListener('click', () => translateAll(true));
+
+(async function init() {
+  for (const [value, label] of LANGS) selTl.append(new Option(label, value));
+  const stored = await chrome.storage.local.get({
+    target: 'Japanese',
+    sync: true,
+    profiles: null,
+    activeProfileId: null,
+    url: null, // 旧バージョン（単一設定）からの移行用
+    model: null,
+  });
+  selTl.value = stored.target;
+  chkSync.checked = stored.sync;
+
+  if (Array.isArray(stored.profiles) && stored.profiles.length) {
+    profiles = stored.profiles;
+    activeProfileId = profiles.some((p) => p.id === stored.activeProfileId) ? stored.activeProfileId : profiles[0].id;
+    // 翻訳指示（テンプレート）欄を追加する前に作られたプロファイルは空のままなので、
+    // 既定文を実値として埋めておく（編集しやすくするため、空＝既定値のプレースホルダー表示はやめた）
+    let migrated = false;
+    for (const p of profiles) {
+      if (!p.template) {
+        p.template = STTranslate.DEFAULT_TEMPLATE;
+        migrated = true;
+      }
+    }
+    if (migrated) await saveProfiles();
+  } else {
+    // 旧バージョンは Ollama 固定の単一設定だった。あれば引き継いで1つのプロファイルにする
+    const legacy = makeProfile('ollama');
+    if (stored.url) legacy.url = stored.url;
+    if (stored.model) legacy.model = stored.model;
+    profiles = [legacy];
+    activeProfileId = legacy.id;
+    await saveProfiles();
+  }
+  populateProfileSelect();
+  fillEditor(activeProfile());
+  if (!(await hasHostPermission(activeProfile().url))) {
+    setNotice(
+      `「${activeProfile().name}」の接続先へのアクセスが許可されていません。モデル設定のURL欄を一度保存し直すと許可を求められます。`
+    );
+  }
+
+  showEmpty('読み込み中…');
+  const id = Number(new URLSearchParams(location.search).get('tab'));
+  if (!Number.isInteger(id)) return showEmpty(NO_DOC_MESSAGE);
+  tabId = id;
+  loadDoc();
+})();

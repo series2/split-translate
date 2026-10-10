@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "Split Translate",
+  "version": "3.2.0",
+  "minimum_chrome_version": "116",
+  "description": "ページを左に原文・右に翻訳文（サイドパネル）で並べ、ホバーとスクロールで対応箇所を連動させます。翻訳は Ollama（ローカル）、OpenAI互換API、Anthropic から選べます。",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "sidePanel",
+    "webNavigation"
+  ],
+  "host_permissions": [
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "原文と翻訳を左右に並べて表示"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+T",
+        "mac": "Alt+Shift+T"
+      },
+      "description": "原文と翻訳を左右に並べて表示"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
