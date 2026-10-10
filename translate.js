@@ -227,7 +227,12 @@
         prompt: instructPrompt(text, target, opts.template),
         stream: false,
         keep_alive: '30m',
-        options: { temperature: opts.temperature ?? 0 },
+        options: {
+          temperature: opts.temperature ?? 0,
+          // 上限を付けないと、モデルが訳文で止まらず生成し続け、stream:false のため
+          // 応答が返ってくるまでいつまでも待たされる（固まったように見える）ことがある
+          num_predict: Math.min(2048, Math.max(128, text.length * 3 + 64)),
+        },
       },
       opts
     );
@@ -247,6 +252,7 @@
         body: JSON.stringify({
           model: opts.model,
           temperature: opts.temperature ?? 0,
+          max_tokens: Math.min(4096, Math.max(256, text.length * 3 + 128)),
           messages: [
             { role: 'system', content: buildInstruction(target, opts.template) },
             { role: 'user', content: text },

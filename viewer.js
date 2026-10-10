@@ -739,12 +739,21 @@ function populateProfileSelect() {
   selProfile.value = activeProfileId;
 }
 
+/** PLaMo-2-Translate は専用の固定プロンプトを使うため、翻訳指示（テンプレート）を無視する。 */
+function isPlamoModel(provider, model) {
+  return provider === 'ollama' && /plamo/i.test(model || '');
+}
+
 function updateProviderVisibility(provider) {
   rowKey.hidden = provider === 'ollama';
   btnRefreshModels.hidden = provider !== 'ollama';
+  const plamo = isPlamoModel(provider, inModel.value);
+  inTemplate.disabled = plamo;
   cfgHint.textContent =
     provider === 'ollama'
-      ? 'モデル名に "plamo" を含む場合だけ PLaMo-2-Translate 専用の高品質な翻訳ロジックを使い、下の翻訳指示は無視されます。それ以外のモデルは、下の翻訳指示を Ollama 標準のチャットテンプレートに渡して翻訳します。'
+      ? plamo
+        ? 'モデル名に "plamo" を含むため、PLaMo-2-Translate 専用の高品質な翻訳ロジックを使います。翻訳指示（テンプレート）はこのモデルでは使われないため編集できません。'
+        : '下の翻訳指示を Ollama 標準のチャットテンプレートに渡して翻訳します。'
       : provider === 'openai'
       ? 'OpenAI 本体のほか、Groq・OpenRouter・DeepSeek・LM Studio など /chat/completions 互換のエンドポイントを指定できます。URL は /v1 まで含めてください。'
       : 'Anthropic の Messages API（Claude）を使います。';
@@ -851,6 +860,9 @@ selProvider.addEventListener('change', () => {
   if (wasDefaultModel) inModel.value = d.model;
   updateProviderVisibility(provider);
 });
+
+// モデル名を打ち替えたときも、plamo かどうかに応じて翻訳指示欄の有効/無効をその場で切り替える
+inModel.addEventListener('input', () => updateProviderVisibility(selProvider.value));
 
 /**
  * 「更新」ボタン。編集欄の内容を選択中のプロファイルへ反映し、保存する。

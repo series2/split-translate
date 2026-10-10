@@ -178,6 +178,13 @@ body {
   line-height: 1.5;
 }
 
+.settings input:disabled,
+.settings textarea:disabled {
+  color: var(--muted);
+  background: var(--bg);
+  cursor: not-allowed;
+}
+
 #cfg-refresh-models {
   flex: none;
   font: inherit;
