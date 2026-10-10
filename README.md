@@ -1,4 +1,5 @@
 # Split Translate
+<img width="1903" height="834" alt="AppViewer" src="https://github.com/user-attachments/assets/c534af1d-a6db-4f9c-b483-4982b00619c8" />
 
 Webページを左右に並べて表示する Chrome 拡張機能です。左（元のタブ）が原文、右（サイドパネル）がページをそのまま複製して文章だけを訳文に差し替えたもので、レイアウト・画像・リンクは元のページと同じまま読めます。
 
