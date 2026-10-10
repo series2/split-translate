@@ -27,10 +27,53 @@ const LANGS = [
   ['Indonesian', 'インドネシア語（実験的）'],
 ];
 // プロバイダーごとの既定値。モデル設定を新規作成/プロバイダー切替したときに使う。
+// needsKey/needsModel/needsTemplate/needsRegion: 編集欄の各項目をそのプロバイダーで見せるか。
 const PROVIDER_DEFAULTS = {
-  ollama: { label: 'Ollama', url: 'http://localhost:11434', model: 'mitmul/plamo-2-translate' },
-  openai: { label: 'OpenAI', url: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-  anthropic: { label: 'Anthropic', url: 'https://api.anthropic.com', model: 'claude-haiku-4-5-20251001' },
+  ollama: {
+    label: 'Ollama',
+    url: 'http://localhost:11434',
+    model: 'mitmul/plamo-2-translate',
+    needsKey: false,
+    needsModel: true,
+    needsTemplate: true,
+    needsRegion: false,
+  },
+  openai: {
+    label: 'OpenAI',
+    url: 'https://api.openai.com/v1',
+    model: 'gpt-4o-mini',
+    needsKey: true,
+    needsModel: true,
+    needsTemplate: true,
+    needsRegion: false,
+  },
+  anthropic: {
+    label: 'Anthropic',
+    url: 'https://api.anthropic.com',
+    model: 'claude-haiku-4-5-20251001',
+    needsKey: true,
+    needsModel: true,
+    needsTemplate: true,
+    needsRegion: false,
+  },
+  google: {
+    label: 'Google Cloud Translation',
+    url: 'https://translation.googleapis.com',
+    model: '',
+    needsKey: true,
+    needsModel: false,
+    needsTemplate: false,
+    needsRegion: false,
+  },
+  azure: {
+    label: 'Azure AI Translator',
+    url: 'https://api.cognitive.microsofttranslator.com',
+    model: '',
+    needsKey: true,
+    needsModel: false,
+    needsTemplate: false,
+    needsRegion: true,
+  },
 };
 const CONCURRENCY = 2;
 const MAX_CACHE_ENTRIES = 4000;
@@ -62,11 +105,15 @@ const inName = $('#cfg-name');
 const selProvider = $('#cfg-provider');
 const inUrl = $('#cfg-url');
 const inKey = $('#cfg-key');
+const inRegion = $('#cfg-region');
 const inModel = $('#cfg-model');
 const modelList = $('#cfg-model-list');
 const btnRefreshModels = $('#cfg-refresh-models');
 const inTemplate = $('#cfg-template');
 const rowKey = $('#cfg-key-row');
+const rowRegion = $('#cfg-region-row');
+const rowModel = $('#cfg-model-row');
+const rowTemplate = $('#cfg-template-row');
 const cfgHint = $('#cfg-hint');
 const btnUpdate = $('#cfg-update');
 const btnAdd = $('#cfg-add');
@@ -109,8 +156,8 @@ function activeProfile() {
 
 const cfg = () => {
   const p = activeProfile();
-  if (!p) return { provider: 'ollama', url: PROVIDER_DEFAULTS.ollama.url, apiKey: '', model: PROVIDER_DEFAULTS.ollama.model, template: '' };
-  return { provider: p.provider, url: p.url.replace(/\/+$/, ''), apiKey: p.apiKey, model: p.model, template: p.template };
+  if (!p) return { provider: 'ollama', url: PROVIDER_DEFAULTS.ollama.url, apiKey: '', model: PROVIDER_DEFAULTS.ollama.model, template: '', region: '' };
+  return { provider: p.provider, url: p.url.replace(/\/+$/, ''), apiKey: p.apiKey, model: p.model, template: p.template, region: p.region };
 };
 
 // ---------------------------------------------------------------------------
@@ -140,7 +187,13 @@ function explain(err) {
         return String(err?.message || err);
     }
   }
-  const providerName = provider === 'openai' ? 'OpenAI互換API' : 'Anthropic API';
+  const providerNames = {
+    openai: 'OpenAI互換API',
+    anthropic: 'Anthropic API',
+    google: 'Google Cloud Translation API',
+    azure: 'Azure AI Translator',
+  };
+  const providerName = providerNames[provider] || provider;
   switch (err.code) {
     case 'network':
       return (
@@ -149,7 +202,9 @@ function explain(err) {
         '・この接続先への拡張機能からのアクセスが許可されているか確認してください（モデル設定のURL欄を保存し直すと許可を求められます）'
       );
     case 'forbidden':
-      return `${providerName}がAPIキーを拒否しました。キーが正しいか、利用枠が残っているか確認してください。`;
+      return provider === 'azure'
+        ? `${providerName}がAPIキーを拒否しました。キーとリージョン（例: japaneast、不明なら global）が正しいか確認してください。`
+        : `${providerName}がAPIキーを拒否しました。キーが正しいか、利用枠が残っているか確認してください。`;
     case 'model':
       return `モデル ${model} が見つかりません。モデル名が正しいか確認してください。`;
     default:
@@ -727,6 +782,7 @@ function makeProfile(provider) {
     apiKey: '',
     model: d.model,
     template: STTranslate.DEFAULT_TEMPLATE,
+    region: '',
   };
 }
 
@@ -745,10 +801,14 @@ function isPlamoModel(provider, model) {
 }
 
 function updateProviderVisibility(provider) {
-  rowKey.hidden = provider === 'ollama';
+  const d = defaultsFor(provider);
+  rowKey.hidden = !d.needsKey;
+  rowRegion.hidden = !d.needsRegion;
+  rowModel.hidden = !d.needsModel;
+  rowTemplate.hidden = !d.needsTemplate;
   btnRefreshModels.hidden = provider !== 'ollama';
   const plamo = isPlamoModel(provider, inModel.value);
-  inTemplate.disabled = plamo;
+  inTemplate.disabled = plamo || !d.needsTemplate;
   cfgHint.textContent =
     provider === 'ollama'
       ? plamo
@@ -756,7 +816,11 @@ function updateProviderVisibility(provider) {
         : '下の翻訳指示を Ollama 標準のチャットテンプレートに渡して翻訳します。'
       : provider === 'openai'
       ? 'OpenAI 本体のほか、Groq・OpenRouter・DeepSeek・LM Studio など /chat/completions 互換のエンドポイントを指定できます。URL は /v1 まで含めてください。'
-      : 'Anthropic の Messages API（Claude）を使います。';
+      : provider === 'anthropic'
+      ? 'Anthropic の Messages API（Claude）を使います。'
+      : provider === 'google'
+      ? '翻訳専用の API です（モデル・指示文の指定はありません）。Google Cloud のAPIキーが必要です。月50万文字まで無料です。'
+      : 'Azure の翻訳専用 API です（モデル・指示文の指定はありません）。サブスクリプションキーに加えて、多くのリソースでリージョン（例: japaneast、不明なら global）の指定が必要です。月200万文字まで無料です。';
 }
 
 /** Ollama にインストール済みのモデル一覧を取得し、モデル欄の候補（datalist）に反映する。 */
@@ -782,6 +846,7 @@ function fillEditor(p) {
   selProvider.value = p.provider;
   inUrl.value = p.url;
   inKey.value = p.apiKey || '';
+  inRegion.value = p.region || '';
   inModel.value = p.model;
   inTemplate.value = p.template || '';
   updateProviderVisibility(p.provider);
@@ -796,6 +861,7 @@ function commitEditor() {
   p.name = inName.value.trim() || d.label;
   p.url = inUrl.value.trim().replace(/\/+$/, '') || d.url;
   p.apiKey = inKey.value;
+  p.region = inRegion.value.trim();
   p.model = inModel.value.trim() || d.model;
   p.template = inTemplate.value;
   populateProfileSelect(); // 名前の変更を一覧に反映
@@ -896,6 +962,7 @@ function profileFromEditor() {
     provider,
     url: inUrl.value.trim().replace(/\/+$/, '') || d.url,
     apiKey: inKey.value,
+    region: inRegion.value.trim(),
     model: inModel.value.trim() || d.model,
     template: inTemplate.value,
   };

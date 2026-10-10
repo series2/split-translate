@@ -4,7 +4,7 @@ Webページを左右に並べて表示する Chrome 拡張機能です。左（
 
 - マウスホバーで、原文⇔訳文の対応するブロックが連動してハイライトされます
 - どちらをスクロールしても、もう片方が同じ位置まで追従します
-- 翻訳は **Ollama（ローカル）** / **OpenAI互換API** / **Anthropic（Claude）** から選べます。複数の接続設定を保存しておき、ツールバーから切り替えられます
+- 翻訳は **Ollama（ローカル）** / **OpenAI互換API** / **Anthropic（Claude）** / **Google Cloud Translation** / **Azure AI Translator** から選べます。複数の接続設定を保存しておき、ツールバーから切り替えられます
 
 ## できないこと / 制限事項
 
@@ -57,9 +57,17 @@ OpenAI本体のほか、Groq・OpenRouter・DeepSeek・LM Studio・text-generati
 
 Claude の Messages API を使います。URL の既定値は `https://api.anthropic.com`。APIキーが必要です。
 
+### Google Cloud Translation
+
+翻訳専用の公式API（Basic v2）です。チャット用のモデル名や指示文（テンプレート）の概念はありません。[Google Cloud Console](https://console.cloud.google.com/apis/credentials) でAPIキーを発行してください。**月50万文字まで無料**（期限なし）、以降は100万文字あたり$20です。
+
+### Azure AI Translator
+
+Microsoft の翻訳専用API（v3.0）です。こちらもモデル名や指示文はありません。[Azure Portal](https://portal.azure.com/) で Translator リソースを作成し、サブスクリプションキーを取得してください。多くのリソースでは**リージョン**の指定も必要です（リソース作成時に選んだリージョン、例: `japaneast`。グローバルリソースの場合は `global`）。**月200万文字まで無料**（期限なし）、以降は100万文字あたり$10です。
+
 ### 自前サーバーや他のクラウドAPIを使う場合（ホスト権限）
 
-`localhost` / `127.0.0.1`（Ollama）、`api.openai.com`、`api.anthropic.com` 以外のURLを設定すると、Chromeがそのサイトへのアクセス許可を一度確認します。モデル設定のURL欄を保存すると許可ダイアログが出るので、許可してください。許可されなかった場合は通知欄にその旨が表示されます。
+`localhost` / `127.0.0.1`（Ollama）、`api.openai.com`、`api.anthropic.com`、`translation.googleapis.com`、`api.cognitive.microsofttranslator.com` 以外のURLを設定すると、Chromeがそのサイトへのアクセス許可を一度確認します。モデル設定のURL欄を保存すると許可ダイアログが出るので、許可してください。許可されなかった場合は通知欄にその旨が表示されます。
 
 ## プライバシー
 
@@ -75,7 +83,7 @@ Claude の Messages API を使います。URL の既定値は `https://api.anthr
 | `content.js` | 元ページに常駐。本文ブロックの抽出、複製HTMLの生成、ホバー/スクロール同期 |
 | `compose.js` | 訳文を元のDOM構造（リンク・強調など）に復元する |
 | `scrollsync.js` | 本文のスクロール領域を自動検出するロジック（`content.js`・`viewer.js` で共用） |
-| `translate.js` | 翻訳バックエンド（Ollama / OpenAI互換 / Anthropic）の呼び出し |
+| `translate.js` | 翻訳バックエンド（Ollama / OpenAI互換 / Anthropic / Google Cloud Translation / Azure AI Translator）の呼び出し |
 | `viewer.js` / `viewer.html` / `viewer.css` | サイドパネル本体 |
 
 content.js と viewer.js 側の両方で、スクロール連動・モデル設定・プロファイル切り替えのロジックが動いています。詳しい設計意図は各ファイル冒頭のコメントを参照してください。

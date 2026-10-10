@@ -34,16 +34,19 @@
             <option value="ollama">Ollama（ローカル）</option>
             <option value="openai">OpenAI互換API</option>
             <option value="anthropic">Anthropic</option>
+            <option value="google">Google Cloud Translation</option>
+            <option value="azure">Azure AI Translator</option>
           </select>
         </label>
         <label>URL <input id="cfg-url" type="text" spellcheck="false" /></label>
         <label id="cfg-key-row">APIキー <input id="cfg-key" type="password" spellcheck="false" autocomplete="off" /></label>
-        <label>モデル
+        <label id="cfg-region-row">リージョン <input id="cfg-region" type="text" spellcheck="false" placeholder="例: japaneast（不明なら global）" /></label>
+        <label id="cfg-model-row">モデル
           <input id="cfg-model" type="text" spellcheck="false" list="cfg-model-list" />
           <button id="cfg-refresh-models" type="button" title="Ollamaのインストール済みモデル一覧を取得">🔄</button>
         </label>
         <datalist id="cfg-model-list"></datalist>
-        <label class="col">翻訳指示（テンプレート）
+        <label class="col" id="cfg-template-row">翻訳指示（テンプレート）
           <textarea id="cfg-template" rows="4" spellcheck="false"></textarea>
         </label>
         <p class="hint" id="cfg-hint"></p>

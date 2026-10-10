@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Split Translate",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "minimum_chrome_version": "116",
-  "description": "ページを左に原文・右に翻訳文（サイドパネル）で並べ、ホバーとスクロールで対応箇所を連動させます。翻訳は Ollama（ローカル）、OpenAI互換API、Anthropic から選べます。",
+  "description": "ページを左に原文・右に翻訳文（サイドパネル）で並べ、ホバーとスクロールで対応箇所を連動させます。翻訳は Ollama（ローカル）、OpenAI互換API、Anthropic、Google Cloud Translation、Azure AI Translator から選べます。",
   "permissions": [
     "activeTab",
     "scripting",
@@ -15,7 +15,9 @@
     "http://localhost/*",
     "http://127.0.0.1/*",
     "https://api.openai.com/*",
-    "https://api.anthropic.com/*"
+    "https://api.anthropic.com/*",
+    "https://translation.googleapis.com/*",
+    "https://api.cognitive.microsofttranslator.com/*"
   ],
   "optional_host_permissions": [
     "http://*/*",

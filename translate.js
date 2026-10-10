@@ -1,10 +1,12 @@
 'use strict';
 
-// 翻訳バックエンド。3 種類のプロバイダーに対応する。DOM 非依存（Node からもテストできる）。
+// 翻訳バックエンド。5 種類のプロバイダーに対応する。DOM 非依存（Node からもテストできる）。
 //   - Ollama + PLaMo-2-Translate: 専用の高品質ロジック（文分割・暴走検出・再試行）
 //   - Ollama + それ以外のモデル : Ollama 同梱のチャットテンプレートに素直な翻訳指示を渡す
 //   - OpenAI 互換 API          : OpenAI 本体・Groq・OpenRouter・DeepSeek・LM Studio 等
 //   - Anthropic API            : Claude
+//   - Google Cloud Translation : 翻訳専用 API（指示文のカスタマイズ不可）
+//   - Azure AI Translator      : 翻訳専用 API（指示文のカスタマイズ不可、リージョン指定が必要なことが多い）
 (function (root) {
   const KANA = /[぀-ヿ]/;
   const ASCII_LATIN = /^[\u0000-ɏ -⁯€]*$/; // 英語らしい文字だけ
@@ -309,24 +311,106 @@
   }
 
   // ===========================================================================
+  // 言語名 → 言語コード（Google Cloud Translation / Azure AI Translator 用）
+  //   LANGS（viewer.js）の value（英語の言語名）をそのまま渡しても通らないため変換する。
+  //   中国語だけ Google と Azure で書式が違う（zh-CN / zh-Hans）。
+  // ===========================================================================
+  const LANG_CODES = {
+    Japanese: 'ja',
+    English: 'en',
+    Chinese: 'zh-CN',
+    Korean: 'ko',
+    French: 'fr',
+    German: 'de',
+    Spanish: 'es',
+    Italian: 'it',
+    Russian: 'ru',
+    Arabic: 'ar',
+    Thai: 'th',
+    Vietnamese: 'vi',
+    Indonesian: 'id',
+  };
+
+  function langCodeFor(provider, target) {
+    if (target === 'Chinese' && provider === 'azure') return 'zh-Hans';
+    return LANG_CODES[target] || target;
+  }
+
+  // ===========================================================================
+  // Google Cloud Translation API（Basic v2）
+  //   翻訳専用の API なので、チャット用の指示文（テンプレート）は使わない。
+  // ===========================================================================
+  async function translateGoogle(text, target, opts) {
+    let res;
+    try {
+      res = await fetch(`${opts.url}/language/translate/v2?key=${encodeURIComponent(opts.apiKey || '')}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q: text, target: langCodeFor('google', target), format: 'text' }),
+      });
+    } catch {
+      throw new TranslateError('network', 'APIに接続できません（URL・ネットワーク・拡張機能へのアクセス許可を確認してください）', true);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401 || res.status === 403) throw new TranslateError('forbidden', 'APIキーが拒否されました', true);
+    if (!res.ok) {
+      const msg = String(data.error?.message || `HTTP ${res.status}`);
+      throw new TranslateError('http', `APIがエラーを返しました: ${msg}`);
+    }
+    const out = data.data?.translations?.[0]?.translatedText;
+    return out != null ? String(out) : text;
+  }
+
+  // ===========================================================================
+  // Azure AI Translator（v3.0）
+  //   サブスクリプションキーに加えて、多くのリソースでリージョンの指定が必要。
+  // ===========================================================================
+  async function translateAzure(text, target, opts) {
+    let res;
+    try {
+      const headers = { 'Content-Type': 'application/json', 'Ocp-Apim-Subscription-Key': opts.apiKey || '' };
+      if (opts.region) headers['Ocp-Apim-Subscription-Region'] = opts.region;
+      res = await fetch(`${opts.url}/translate?api-version=3.0&to=${encodeURIComponent(langCodeFor('azure', target))}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify([{ Text: text }]),
+      });
+    } catch {
+      throw new TranslateError('network', 'APIに接続できません（URL・ネットワーク・拡張機能へのアクセス許可を確認してください）', true);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401 || res.status === 403) {
+      throw new TranslateError('forbidden', 'APIキーが拒否されました（リージョンの設定も確認してください）', true);
+    }
+    if (!res.ok) {
+      const msg = String(data.error?.message || `HTTP ${res.status}`);
+      throw new TranslateError('http', `APIがエラーを返しました: ${msg}`);
+    }
+    const out = data?.[0]?.translations?.[0]?.text;
+    return out != null ? String(out) : text;
+  }
+
+  // ===========================================================================
   // 公開 API（プロバイダーで分岐）
   // ===========================================================================
   /**
    * 1 ブロックを翻訳する。
-   * opts: { provider: 'ollama'|'openai'|'anthropic', url, apiKey, model, temperature = 0 }
+   * opts: { provider: 'ollama'|'openai'|'anthropic'|'google'|'azure', url, apiKey, model, region, temperature = 0 }
    * Ollama かつモデル名に "plamo" を含む場合だけ、専用の高品質ロジック（文分割・暴走検出・再試行）を使う。
    */
   async function translate(text, target, opts) {
     if (target === 'Japanese' && KANA.test(text)) return text; // すでに日本語
     if (opts.provider === 'openai') return translateOpenAI(text, target, opts);
     if (opts.provider === 'anthropic') return translateAnthropic(text, target, opts);
+    if (opts.provider === 'google') return translateGoogle(text, target, opts);
+    if (opts.provider === 'azure') return translateAzure(text, target, opts);
     if (!/plamo/i.test(opts.model || '')) return translateOllamaGeneric(text, target, opts);
     return translatePlamo(text, target, opts);
   }
 
-  /** 接続確認。OpenAI 互換・Anthropic は事前チェックをせず、実際の翻訳リクエストのエラーで判断する。 */
+  /** 接続確認。Ollama 以外は事前チェックをせず、実際の翻訳リクエストのエラーで判断する。 */
   async function checkBackend(opts) {
-    if (opts.provider === 'openai' || opts.provider === 'anthropic') return;
+    if (opts.provider !== 'ollama') return;
     return checkOllama(opts);
   }
 
