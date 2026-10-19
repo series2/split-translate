@@ -84,6 +84,12 @@ const PROVIDER_DEFAULTS = {
     needsRegion: true,
   },
 };
+const CHAT_PROVIDER_DEFAULTS = {
+  chrome: { label: 'Chrome内蔵 Local LLM', url: '', model: '', needsKey: false },
+  ollama: { label: 'Ollamaチャット', url: 'http://localhost:11434', model: 'gemma3:4b', needsKey: false },
+  openai: { label: 'OpenAIチャット', url: 'https://api.openai.com/v1', model: 'gpt-4o-mini', needsKey: true },
+  anthropic: { label: 'Anthropicチャット', url: 'https://api.anthropic.com', model: 'claude-haiku-4-5-20251001', needsKey: true },
+};
 const CONCURRENCY = 2;
 const MAX_CACHE_ENTRIES = 4000;
 
@@ -144,6 +150,22 @@ const cfgHint = $('#cfg-hint');
 const btnUpdate = $('#cfg-update');
 const btnAdd = $('#cfg-add');
 const btnDelete = $('#cfg-delete');
+const chatSettings = $('#chat-model-settings');
+const selChatCfgProfile = $('#chat-cfg-profile');
+const inChatCfgName = $('#chat-cfg-name');
+const selChatCfgProvider = $('#chat-cfg-provider');
+const inChatCfgUrl = $('#chat-cfg-url');
+const inChatCfgKey = $('#chat-cfg-key');
+const inChatCfgModel = $('#chat-cfg-model');
+const chatCfgModelList = $('#chat-cfg-model-list');
+const btnChatCfgRefresh = $('#chat-cfg-refresh-models');
+const rowChatCfgUrl = $('#chat-cfg-url-row');
+const rowChatCfgKey = $('#chat-cfg-key-row');
+const rowChatCfgModel = $('#chat-cfg-model-row');
+const chatCfgHint = $('#chat-cfg-hint');
+const btnChatCfgUpdate = $('#chat-cfg-update');
+const btnChatCfgAdd = $('#chat-cfg-add');
+const btnChatCfgDelete = $('#chat-cfg-delete');
 
 inTemplate.placeholder = STTranslate.DEFAULT_TEMPLATE;
 
@@ -161,6 +183,7 @@ let paused = false; // true の間は、ホバー/スクロールなどによる
 let activeLanguagePair = ''; // Chrome/Edge 内蔵翻訳が実際に使っている言語ペア（例: en → ja）
 let profiles = []; // 保存されたモデル設定 [{ id, name, provider, url, apiKey, model }]
 let activeProfileId = null;
+let chatProfiles = []; // 翻訳設定とは独立したLLMチャット用設定
 const stores = new Map(); // `${docId}|${profileId}|${lang}` -> string[]
 const textCache = new Map(); // `${profileId}|${lang}|${原文}` -> 訳（再抽出・パネルの開き直しをまたいで使い回す）
 const BUILTIN_CHAT_ID = '__chrome_builtin_llm__';
@@ -404,18 +427,13 @@ async function switchChatDomain(d) {
 }
 
 function chatProfile() {
-  if (activeChatProfileId === BUILTIN_CHAT_ID) return { id: BUILTIN_CHAT_ID, provider: 'chrome', name: 'Chrome内蔵 Local LLM' };
-  return profiles.find((p) => p.id === activeChatProfileId) || null;
+  return chatProfiles.find((p) => p.id === activeChatProfileId) || chatProfiles[0] || null;
 }
 
 function populateChatProfileSelect() {
-  const supported = profiles.filter((p) => ['ollama', 'openai', 'anthropic'].includes(p.provider));
   const previous = activeChatProfileId;
-  selChatProfile.replaceChildren(
-    new Option('Chrome内蔵 Local LLM', BUILTIN_CHAT_ID),
-    ...supported.map((p) => new Option(p.name || '(無題)', p.id))
-  );
-  if (![BUILTIN_CHAT_ID, ...supported.map((p) => p.id)].includes(activeChatProfileId)) activeChatProfileId = BUILTIN_CHAT_ID;
+  selChatProfile.replaceChildren(...chatProfiles.map((p) => new Option(p.name || '(無題)', p.id)));
+  if (!chatProfiles.some((p) => p.id === activeChatProfileId)) activeChatProfileId = chatProfiles[0]?.id || BUILTIN_CHAT_ID;
   selChatProfile.value = activeChatProfileId;
   if (activeChatProfileId !== previous) {
     chrome.storage.local.set({ activeChatProfileId });
@@ -1090,7 +1108,6 @@ function saveProfiles() {
 function populateProfileSelect() {
   selProfile.replaceChildren(...profiles.map((p) => new Option(p.name || '(無題)', p.id)));
   selProfile.value = activeProfileId;
-  populateChatProfileSelect();
 }
 
 /** PLaMo-2-Translate は専用の固定プロンプトを使うため、翻訳指示（テンプレート）を無視する。 */
@@ -1198,14 +1215,14 @@ async function hasHostPermission(url) {
   }
 }
 
-async function ensureHostPermission(url) {
-  if (!providerNeedsHost(selProvider.value)) return true;
+async function ensureHostPermission(url, provider = selProvider.value) {
+  if (!providerNeedsHost(provider)) return true;
   const origin = originOf(url);
   if (!origin) return false;
   if (await hasHostPermission(url)) return true;
   try {
     const granted = await chrome.permissions.request({ origins: [origin] });
-    if (!granted) setNotice(`${origin} へのアクセスが許可されなかったため、翻訳できません。`);
+    if (!granted) setNotice(`${origin} へのアクセスが許可されなかったため、接続できません。`);
     return granted;
   } catch (err) {
     console.warn('permission request failed', err);
@@ -1298,6 +1315,152 @@ btnDelete.addEventListener('click', async () => {
   fillEditor(activeProfile());
   await saveProfiles();
   translateAll();
+});
+
+// ---------------------------------------------------------------------------
+// LLMチャット用モデル設定（翻訳モデル設定とは別管理）
+// ---------------------------------------------------------------------------
+function chatDefaultsFor(provider) {
+  return CHAT_PROVIDER_DEFAULTS[provider] || CHAT_PROVIDER_DEFAULTS.ollama;
+}
+
+function uniqueChatProfileName(base) {
+  const existing = new Set(chatProfiles.map((p) => p.name));
+  if (!existing.has(base)) return base;
+  let n = 2;
+  while (existing.has(`${base} ${n}`)) n++;
+  return `${base} ${n}`;
+}
+
+function makeChatProfile(provider = 'ollama', id = crypto.randomUUID()) {
+  const d = chatDefaultsFor(provider);
+  return { id, name: uniqueChatProfileName(d.label), provider, url: d.url, apiKey: '', model: d.model };
+}
+
+function saveChatProfiles() {
+  return chrome.storage.local.set({ chatProfiles, activeChatProfileId });
+}
+
+function updateChatProviderVisibility() {
+  const provider = selChatCfgProvider.value;
+  const d = chatDefaultsFor(provider);
+  const builtin = selChatCfgProfile.value === BUILTIN_CHAT_ID;
+  selChatCfgProvider.disabled = builtin;
+  rowChatCfgUrl.hidden = provider === 'chrome';
+  rowChatCfgKey.hidden = !d.needsKey;
+  rowChatCfgModel.hidden = provider === 'chrome';
+  btnChatCfgRefresh.hidden = provider !== 'ollama';
+  btnChatCfgDelete.disabled = builtin || chatProfiles.length <= 1;
+  chatCfgHint.textContent =
+    provider === 'chrome'
+      ? 'Chromeが管理する内蔵モデルを端末内で使います。モデル名は変更できません。'
+      : provider === 'ollama'
+      ? 'OllamaのチャットAPIを使います。翻訳用モデルとは別のモデルを指定できます。'
+      : provider === 'openai'
+      ? 'OpenAI本体または /chat/completions 互換APIを使います。URLは /v1 まで含めてください。'
+      : 'Anthropic Messages APIを使います。';
+}
+
+function fillChatEditor(profile) {
+  if (!profile) return;
+  selChatCfgProfile.value = profile.id;
+  inChatCfgName.value = profile.name || '';
+  selChatCfgProvider.value = profile.provider;
+  inChatCfgUrl.value = profile.url || '';
+  inChatCfgKey.value = profile.apiKey || '';
+  inChatCfgModel.value = profile.model || '';
+  updateChatProviderVisibility();
+}
+
+function populateChatConfigSelect() {
+  selChatCfgProfile.replaceChildren(...chatProfiles.map((p) => new Option(p.name || '(無題)', p.id)));
+  selChatCfgProfile.value = activeChatProfileId;
+}
+
+function refreshChatProfileControls() {
+  populateChatProfileSelect();
+  populateChatConfigSelect();
+  fillChatEditor(chatProfile());
+}
+
+selChatCfgProfile.addEventListener('change', () => {
+  activeChatProfileId = selChatCfgProfile.value;
+  refreshChatProfileControls();
+  saveChatProfiles();
+  switchChatDomain(doc);
+});
+
+selChatCfgProvider.addEventListener('change', () => {
+  const provider = selChatCfgProvider.value;
+  const d = chatDefaultsFor(provider);
+  const knownUrls = Object.values(CHAT_PROVIDER_DEFAULTS).map((item) => item.url);
+  const knownModels = Object.values(CHAT_PROVIDER_DEFAULTS).map((item) => item.model);
+  if (knownUrls.includes(inChatCfgUrl.value.trim())) inChatCfgUrl.value = d.url;
+  if (knownModels.includes(inChatCfgModel.value.trim())) inChatCfgModel.value = d.model;
+  updateChatProviderVisibility();
+});
+
+btnChatCfgRefresh.addEventListener('click', async () => {
+  const url = (inChatCfgUrl.value.trim() || CHAT_PROVIDER_DEFAULTS.ollama.url).replace(/\/+$/, '');
+  btnChatCfgRefresh.disabled = true;
+  try {
+    const res = await fetch(`${url}/api/tags`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { models = [] } = await res.json();
+    chatCfgModelList.replaceChildren(...models.map((m) => new Option(m.name || m.model)));
+    chatStatusEl.textContent = models.length ? `${models.length}件のOllamaモデルを取得しました` : 'Ollamaモデルが見つかりませんでした';
+  } catch (err) {
+    chatStatusEl.textContent = `Ollamaモデル一覧を取得できませんでした: ${err.message || err}`;
+    chatStatusEl.classList.add('error');
+  } finally {
+    btnChatCfgRefresh.disabled = false;
+  }
+});
+
+btnChatCfgUpdate.addEventListener('click', async () => {
+  const profile = chatProfile();
+  if (!profile) return;
+  if (profile.id !== BUILTIN_CHAT_ID) {
+    const provider = selChatCfgProvider.value;
+    const defaults = chatDefaultsFor(provider);
+    const url = inChatCfgUrl.value.trim().replace(/\/+$/, '') || defaults.url;
+    if (!(await ensureHostPermission(url, provider))) return;
+    Object.assign(profile, {
+      name: inChatCfgName.value.trim() || defaults.label,
+      provider,
+      url,
+      apiKey: inChatCfgKey.value,
+      model: inChatCfgModel.value.trim() || defaults.model,
+    });
+  } else {
+    profile.name = inChatCfgName.value.trim() || CHAT_PROVIDER_DEFAULTS.chrome.label;
+  }
+  refreshChatProfileControls();
+  await saveChatProfiles();
+  btnChatCfgUpdate.textContent = '更新しました ✓';
+  setTimeout(() => (btnChatCfgUpdate.textContent = '更新'), 1200);
+});
+
+btnChatCfgAdd.addEventListener('click', async () => {
+  const profile = makeChatProfile('ollama');
+  chatProfiles.push(profile);
+  activeChatProfileId = profile.id;
+  refreshChatProfileControls();
+  await saveChatProfiles();
+  await ensureHostPermission(profile.url, profile.provider);
+  inChatCfgName.focus();
+  inChatCfgName.select();
+  switchChatDomain(doc);
+});
+
+btnChatCfgDelete.addEventListener('click', async () => {
+  if (activeChatProfileId === BUILTIN_CHAT_ID || chatProfiles.length <= 1) return;
+  const removedId = activeChatProfileId;
+  chatProfiles = chatProfiles.filter((p) => p.id !== removedId);
+  activeChatProfileId = chatProfiles[0].id;
+  refreshChatProfileControls();
+  await saveChatProfiles();
+  switchChatDomain(doc);
 });
 
 // ---------------------------------------------------------------------------
@@ -1458,16 +1621,10 @@ btnChatReset.addEventListener('click', resetLlmChat);
 btnChatClose.addEventListener('click', () => setChatOpen(false));
 btnChatSettings.addEventListener('click', () => {
   const profile = chatProfile();
-  if (profile && profile.id !== BUILTIN_CHAT_ID && profile.id !== activeProfileId) {
-    activeProfileId = profile.id;
-    populateProfileSelect();
-    fillEditor(profile);
-    saveProfiles();
-  }
   setToolbarOpen(true);
-  const settings = toolbar.querySelector('.settings');
-  settings.open = true;
-  (profile?.provider === 'chrome' ? selProvider : inModel).focus();
+  chatSettings.open = true;
+  fillChatEditor(profile);
+  (profile?.provider === 'chrome' ? selChatCfgProvider : inChatCfgModel).focus();
 });
 selChatProfile.addEventListener('change', async () => {
   if (chatBusy) {
@@ -1475,15 +1632,16 @@ selChatProfile.addEventListener('change', async () => {
     return;
   }
   const next = selChatProfile.value;
-  const profile = profiles.find((p) => p.id === next);
-  if (profile && providerNeedsHost(profile.provider) && !(await ensureHostPermission(profile.url))) {
+  const profile = chatProfiles.find((p) => p.id === next);
+  if (profile && providerNeedsHost(profile.provider) && !(await ensureHostPermission(profile.url, profile.provider))) {
     selChatProfile.value = activeChatProfileId;
     chatStatusEl.textContent = 'この接続先へのアクセス許可が必要です。';
     chatStatusEl.classList.add('error');
     return;
   }
   activeChatProfileId = next;
-  await chrome.storage.local.set({ activeChatProfileId });
+  refreshChatProfileControls();
+  await saveChatProfiles();
   switchChatDomain(doc);
 });
 
@@ -1506,10 +1664,9 @@ $('#retry').addEventListener('click', () => translateAll(true));
     chatButtonPosition: null,
     chatHeight: null,
     profiles: null,
+    chatProfiles: null,
     activeProfileId: null,
     activeChatProfileId: BUILTIN_CHAT_ID,
-    url: null, // 旧バージョン（単一設定）からの移行用
-    model: null,
   });
   selSl.value = stored.source;
   if (!selSl.value) selSl.value = 'auto';
@@ -1539,29 +1696,26 @@ $('#retry').addEventListener('click', () => translateAll(true));
   if (Array.isArray(stored.profiles) && stored.profiles.length) {
     profiles = stored.profiles;
     activeProfileId = profiles.some((p) => p.id === stored.activeProfileId) ? stored.activeProfileId : profiles[0].id;
-    // 翻訳指示（テンプレート）欄を追加する前に作られたプロファイルは空のままなので、
-    // 既定文を実値として埋めておく（編集しやすくするため、空＝既定値のプレースホルダー表示はやめた）
-    let migrated = false;
-    for (const p of profiles) {
-      if (!p.template) {
-        p.template = STTranslate.DEFAULT_TEMPLATE;
-        migrated = true;
-      }
-    }
-    if (migrated) await saveProfiles();
   } else {
-    // 旧バージョンの Ollama 設定は引き継ぐ。完全な新規インストールでは
-    // 追加セットアップ不要の Chrome 内蔵翻訳を既定にする。
-    const initial = makeProfile(stored.url || stored.model ? 'ollama' : 'chrome');
-    if (stored.url) initial.url = stored.url;
-    if (stored.model) initial.model = stored.model;
+    const initial = makeProfile('chrome');
     profiles = [initial];
     activeProfileId = initial.id;
     await saveProfiles();
   }
   populateProfileSelect();
-  activeChatProfileId = stored.activeChatProfileId;
-  populateChatProfileSelect();
+  if (Array.isArray(stored.chatProfiles) && stored.chatProfiles.length) {
+    chatProfiles = stored.chatProfiles;
+    if (!chatProfiles.some((p) => p.id === BUILTIN_CHAT_ID)) {
+      chatProfiles.unshift(makeChatProfile('chrome', BUILTIN_CHAT_ID));
+    }
+  } else {
+    chatProfiles = [makeChatProfile('chrome', BUILTIN_CHAT_ID)];
+  }
+  activeChatProfileId = chatProfiles.some((p) => p.id === stored.activeChatProfileId)
+    ? stored.activeChatProfileId
+    : BUILTIN_CHAT_ID;
+  refreshChatProfileControls();
+  await saveChatProfiles();
   switchChatDomain(doc);
   fillEditor(activeProfile());
   if (providerNeedsHost(activeProfile().provider) && !(await hasHostPermission(activeProfile().url))) {

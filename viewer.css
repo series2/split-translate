@@ -219,13 +219,15 @@ body {
 }
 
 .settings input:disabled,
+.settings select:disabled,
 .settings textarea:disabled {
   color: var(--muted);
   background: var(--bg);
   cursor: not-allowed;
 }
 
-#cfg-refresh-models {
+#cfg-refresh-models,
+#chat-cfg-refresh-models {
   flex: none;
   font: inherit;
   color: var(--text);
@@ -236,7 +238,8 @@ body {
   cursor: pointer;
 }
 
-#cfg-refresh-models:hover {
+#cfg-refresh-models:hover,
+#chat-cfg-refresh-models:hover {
   border-color: var(--accent);
 }
 
@@ -266,7 +269,8 @@ body {
   line-height: 1.4;
 }
 
-#cfg-add {
+#cfg-add,
+#chat-cfg-add {
   margin-left: auto;
 }
 
@@ -274,7 +278,8 @@ body {
   border-color: var(--accent);
 }
 
-#cfg-delete {
+#cfg-delete,
+#chat-cfg-delete {
   color: var(--err);
   border-color: var(--err);
 }

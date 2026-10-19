@@ -20,7 +20,7 @@
         <label>翻訳先
           <select id="tl"></select>
         </label>
-        <label>モデル設定
+        <label>翻訳モデル
           <select id="profile"></select>
         </label>
         <label class="check"><input type="checkbox" id="sync" checked />スクロール同期</label>
@@ -31,8 +31,8 @@
         <span id="status" class="status" aria-live="polite"></span>
       </div>
       <div id="notice" class="notice" role="alert" hidden></div>
-      <details class="settings">
-        <summary>モデル設定を編集</summary>
+      <details id="translate-settings" class="settings">
+        <summary>翻訳モデル設定を編集</summary>
         <label>名前 <input id="cfg-name" type="text" spellcheck="false" /></label>
         <label>プロバイダー
           <select id="cfg-provider">
@@ -60,6 +60,34 @@
           <button id="cfg-update" type="button">更新</button>
           <button id="cfg-delete" type="button">削除</button>
           <button id="cfg-add" type="button">新規モデル設定として追加</button>
+        </div>
+      </details>
+      <details id="chat-model-settings" class="settings">
+        <summary>LLMチャットモデル設定を編集</summary>
+        <label>設定
+          <select id="chat-cfg-profile"></select>
+        </label>
+        <label>名前 <input id="chat-cfg-name" type="text" spellcheck="false" /></label>
+        <label>プロバイダー
+          <select id="chat-cfg-provider">
+            <option value="chrome">Chrome内蔵 Local LLM</option>
+            <option value="ollama">Ollama</option>
+            <option value="openai">OpenAI互換API</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+        </label>
+        <label id="chat-cfg-url-row">URL <input id="chat-cfg-url" type="text" spellcheck="false" /></label>
+        <label id="chat-cfg-key-row">APIキー <input id="chat-cfg-key" type="password" spellcheck="false" autocomplete="off" /></label>
+        <label id="chat-cfg-model-row">モデル
+          <input id="chat-cfg-model" type="text" spellcheck="false" list="chat-cfg-model-list" />
+          <button id="chat-cfg-refresh-models" type="button" title="Ollamaのインストール済みモデル一覧を取得">🔄</button>
+        </label>
+        <datalist id="chat-cfg-model-list"></datalist>
+        <p class="hint" id="chat-cfg-hint"></p>
+        <div class="settings-actions">
+          <button id="chat-cfg-update" type="button">更新</button>
+          <button id="chat-cfg-delete" type="button">削除</button>
+          <button id="chat-cfg-add" type="button">新規チャット設定として追加</button>
         </div>
       </details>
       <div id="progress" class="progress"><div></div></div>
