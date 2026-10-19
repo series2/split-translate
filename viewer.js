@@ -103,6 +103,9 @@ const $ = (sel) => document.querySelector(sel);
 const frame = $('#frame');
 const emptyEl = $('#empty');
 const titleEl = $('#page-title');
+const toolbar = $('#toolbar');
+const btnToolbarToggle = $('#toolbar-toggle');
+const selSl = $('#sl');
 const selTl = $('#tl');
 const chkSync = $('#sync');
 const statusEl = $('#status');
@@ -120,6 +123,7 @@ const modelList = $('#cfg-model-list');
 const btnRefreshModels = $('#cfg-refresh-models');
 const inTemplate = $('#cfg-template');
 const rowKey = $('#cfg-key-row');
+const rowUrl = $('#cfg-url-row');
 const rowRegion = $('#cfg-region-row');
 const rowModel = $('#cfg-model-row');
 const rowTemplate = $('#cfg-template-row');
@@ -141,6 +145,7 @@ let curStore = []; // 現在の訳（index = ブロック番号。parts は C.SE
 let stateArr = []; // 'pending' | 'done' | 'error' | 'busy'
 let translating = false; // translateAll() のワーカーが実際に動いている間だけ true
 let paused = false; // true の間は、ホバー/スクロールなどによる自動再開（resumeIfIdle）を行わない
+let activeLanguagePair = ''; // Chrome/Edge 内蔵翻訳が実際に使っている言語ペア（例: en → ja）
 let profiles = []; // 保存されたモデル設定 [{ id, name, provider, url, apiKey, model }]
 let activeProfileId = null;
 const stores = new Map(); // `${docId}|${profileId}|${lang}` -> string[]
@@ -173,8 +178,13 @@ const cfg = () => {
     model: p.model,
     template: p.template,
     region: p.region,
-    sourceLanguage: doc?.lang || '',
+    // auto ではページの lang 属性を信用しすぎず、Language Detector で本文から判定する。
+    sourceLanguage: selSl.value === 'auto' ? '' : selSl.value,
+    fallbackSourceLanguage: doc?.lang || '',
     sourceSample: doc ? doc.blocks.slice(0, 20).map(sourceOf).join('\n').slice(0, 4000) : '',
+    onLanguagePair: (source, target) => {
+      activeLanguagePair = `${source} → ${target}`;
+    },
     onDownloadProgress: (loaded) => {
       const percent = Math.round(loaded * 100);
       statusEl.textContent = `内蔵翻訳モデルを取得中… ${percent}%`;
@@ -324,6 +334,9 @@ function currentStore(force) {
 function setNotice(message) {
   noticeEl.hidden = !message;
   noticeEl.textContent = message || '';
+  // ヘッダーを閉じていても致命的なエラーや権限案内は見逃さない。
+  // 自動で開いた状態は保存せず、次回起動時はユーザーの設定を尊重する。
+  if (message && toolbar.hidden) setToolbarOpen(true, false);
 }
 
 function showEmpty(message) {
@@ -343,10 +356,11 @@ function showEmpty(message) {
 }
 
 function setStatus(done, total, failed) {
+  const pair = activeLanguagePair ? `（${activeLanguagePair}）` : '';
   progressEl.firstElementChild.style.width = `${total ? (done / total) * 100 : 0}%`;
   progressEl.classList.toggle('active', done < total);
-  if (done < total) statusEl.textContent = `翻訳中 ${done}/${total}`;
-  else statusEl.textContent = failed ? `完了（失敗 ${failed}）` : `完了 ${total} ブロック`;
+  if (done < total) statusEl.textContent = `翻訳中 ${done}/${total} ${pair}`.trim();
+  else statusEl.textContent = failed ? `完了（失敗 ${failed}）${pair}` : `完了 ${total} ブロック ${pair}`.trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +513,7 @@ function setState(i, st) {
 // ---------------------------------------------------------------------------
 async function translateAll(force = false) {
   if (!doc) return;
+  activeLanguagePair = '';
   paused = false;
   btnPause.textContent = '一時停止';
   const my = ++run;
@@ -840,6 +855,7 @@ function isPlamoModel(provider, model) {
 
 function updateProviderVisibility(provider) {
   const d = defaultsFor(provider);
+  rowUrl.hidden = provider === 'chrome';
   rowKey.hidden = !d.needsKey;
   rowRegion.hidden = !d.needsRegion;
   rowModel.hidden = !d.needsModel;
@@ -1042,24 +1058,42 @@ btnDelete.addEventListener('click', async () => {
 // ---------------------------------------------------------------------------
 // 起動
 // ---------------------------------------------------------------------------
-const savePrefs = () => chrome.storage.local.set({ target: selTl.value, sync: chkSync.checked });
+const savePrefs = () => chrome.storage.local.set({ source: selSl.value, target: selTl.value, sync: chkSync.checked });
 
+function setToolbarOpen(open, save = true) {
+  toolbar.hidden = !open;
+  btnToolbarToggle.setAttribute('aria-expanded', String(open));
+  btnToolbarToggle.textContent = open ? '閉じる' : '設定';
+  btnToolbarToggle.title = open ? 'ヘッダーを隠す' : '翻訳設定を表示';
+  if (save) chrome.storage.local.set({ toolbarOpen: open });
+}
+
+btnToolbarToggle.addEventListener('click', () => setToolbarOpen(toolbar.hidden));
+
+selSl.addEventListener('change', () => (savePrefs(), translateAll(true)));
 selTl.addEventListener('change', () => (savePrefs(), translateAll()));
 chkSync.addEventListener('change', savePrefs);
 $('#retry').addEventListener('click', () => translateAll(true));
 
 (async function init() {
+  selSl.append(new Option('自動検出', 'auto'));
+  for (const [value, label] of LANGS) selSl.append(new Option(label, value));
   for (const [value, label] of LANGS) selTl.append(new Option(label, value));
   const stored = await chrome.storage.local.get({
+    source: 'auto',
     target: 'Japanese',
     sync: true,
+    toolbarOpen: false,
     profiles: null,
     activeProfileId: null,
     url: null, // 旧バージョン（単一設定）からの移行用
     model: null,
   });
+  selSl.value = stored.source;
+  if (!selSl.value) selSl.value = 'auto';
   selTl.value = stored.target;
   chkSync.checked = stored.sync;
+  setToolbarOpen(stored.toolbarOpen, false);
 
   if (Array.isArray(stored.profiles) && stored.profiles.length) {
     profiles = stored.profiles;

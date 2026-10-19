@@ -7,11 +7,15 @@
     <link rel="stylesheet" href="viewer.css" />
   </head>
   <body>
-    <header class="bar">
+    <button id="toolbar-toggle" type="button" aria-controls="toolbar" aria-expanded="false">設定</button>
+    <header class="bar" id="toolbar" hidden>
       <div class="row">
         <a id="page-title" target="_blank" rel="noopener"></a>
       </div>
       <div class="row controls">
+        <label>翻訳元
+          <select id="sl"></select>
+        </label>
         <label>翻訳先
           <select id="tl"></select>
         </label>
@@ -39,7 +43,7 @@
             <option value="azure">Azure AI Translator</option>
           </select>
         </label>
-        <label>URL <input id="cfg-url" type="text" spellcheck="false" /></label>
+        <label id="cfg-url-row">URL <input id="cfg-url" type="text" spellcheck="false" /></label>
         <label id="cfg-key-row">APIキー <input id="cfg-key" type="password" spellcheck="false" autocomplete="off" /></label>
         <label id="cfg-region-row">リージョン <input id="cfg-region" type="text" spellcheck="false" placeholder="例: japaneast（不明なら global）" /></label>
         <label id="cfg-model-row">モデル

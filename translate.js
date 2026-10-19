@@ -337,6 +337,8 @@
   // create() の重複呼び出しを避けるため Promise 自体を言語ペアごとにキャッシュする。
   const chromeTranslators = new Map();
   let chromeDetectorPromise = null;
+  let chromeDetectionSample = '';
+  let chromeDetectionPromise = null;
 
   function normalizeLanguageCode(language) {
     const code = LANG_CODES[language] || String(language || '').trim();
@@ -373,6 +375,16 @@
       chromeDetectorPromise = null;
       throw chromeApiError(err, 'download');
     }
+  }
+
+  function detectChromeLanguageOnce(text) {
+    if (chromeDetectionPromise && chromeDetectionSample === text) return chromeDetectionPromise;
+    chromeDetectionSample = text;
+    chromeDetectionPromise = detectChromeLanguage(text).catch((err) => {
+      chromeDetectionPromise = null;
+      throw err;
+    });
+    return chromeDetectionPromise;
   }
 
   async function getChromeTranslator(source, target, opts) {
@@ -413,9 +425,26 @@
   async function translateChrome(text, target, opts) {
     if (!root.Translator) throw new TranslateError('unsupported', 'Translator API が利用できません', true);
     const targetCode = normalizeLanguageCode(target);
-    const sourceCode = normalizeLanguageCode(opts.sourceLanguage) || (await detectChromeLanguage(opts.sourceSample || text));
+    let sourceCode = normalizeLanguageCode(opts.sourceLanguage);
+    if (!sourceCode) {
+      try {
+        sourceCode = await detectChromeLanguageOnce(opts.sourceSample || text);
+      } catch (err) {
+        // Detector のモデルが使えない環境では、最後の手段として <html lang> を使う。
+        sourceCode = normalizeLanguageCode(opts.fallbackSourceLanguage);
+        if (!sourceCode) throw err;
+      }
+    }
+    opts.onLanguagePair?.(sourceCode, targetCode);
     if (sourceCode === targetCode) return text;
-    const translator = await getChromeTranslator(sourceCode, targetCode, opts);
+    let translator;
+    try {
+      translator = await getChromeTranslator(sourceCode, targetCode, opts);
+    } catch (err) {
+      const translated = chromeApiError(err);
+      translated.message = `${sourceCode} → ${targetCode}: ${translated.message}`;
+      throw translated;
+    }
     try {
       return (await translator.translate(text)) || text;
     } catch (err) {

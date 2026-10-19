@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Split Translate",
-  "version": "3.4.0",
+  "version": "3.4.3",
   "minimum_chrome_version": "116",
   "description": "ページを左に原文・右に翻訳文（サイドパネル）で並べ、ホバーとスクロールで対応箇所を連動させます。Chrome内蔵翻訳（無料・ローカル）と各種翻訳APIに対応します。",
   "permissions": [

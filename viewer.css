@@ -40,13 +40,39 @@ body {
 }
 
 /* ---- ツールバー ---- */
+#toolbar-toggle {
+  position: fixed;
+  z-index: 2147483647;
+  top: 6px;
+  right: 8px;
+  padding: 3px 8px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--pane) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: 11px/1.4 -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Segoe UI', 'Noto Sans JP', sans-serif;
+  cursor: pointer;
+  opacity: 0.72;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+
+#toolbar-toggle:hover,
+#toolbar-toggle[aria-expanded='true'] {
+  color: var(--text);
+  opacity: 1;
+}
+
 .bar {
   position: relative;
   flex: none;
-  padding: 5px 10px 4px;
+  padding: 5px 62px 4px 10px;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
   font-size: 11px;
+}
+
+.bar[hidden] {
+  display: none;
 }
 
 .bar .row {
