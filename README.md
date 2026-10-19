@@ -5,7 +5,7 @@ Webページを左右に並べて表示する Chrome 拡張機能です。左（
 
 - マウスホバーで、原文⇔訳文の対応するブロックが連動してハイライトされます
 - どちらをスクロールしても、もう片方が同じ位置まで追従します
-- 翻訳は **Ollama（ローカル）** / **OpenAI互換API** / **Anthropic（Claude）** / **Google Cloud Translation** / **Azure AI Translator** から選べます。複数の接続設定を保存しておき、ツールバーから切り替えられます
+- 翻訳は **ブラウザー内蔵翻訳（Chrome / Edge、無料・ローカル）** / **Ollama（ローカル）** / **OpenAI互換API** / **Anthropic（Claude）** / **Google Cloud Translation** / **Azure AI Translator** から選べます。複数の接続設定を保存しておき、ツールバーから切り替えられます
 
 ## できないこと / 制限事項
 
@@ -34,6 +34,10 @@ Webページを左右に並べて表示する Chrome 拡張機能です。左（
 ## モデル設定（翻訳バックエンド）
 
 ツールバーの「モデル設定」から、保存済みの設定を切り替えられます。「モデル設定を編集」を開くと、名前・プロバイダー・接続先URL・APIキー・モデル名を編集できます。「新規追加」で別の設定を追加し、用途に応じて使い分けられます（例: 普段はローカルのOllama、精度重視のときだけクラウドのモデル）。
+
+### ブラウザー内蔵翻訳（Chrome / Edge、ローカル、無料）
+
+デスクトップ版 Chrome 138 以降または対応版Edgeの Translator API を使います。初回の翻訳時にブラウザーが必要な言語モデルをダウンロードし、以降の翻訳は端末内で実行します。APIキーやOllamaのインストールは不要です。初回取得にユーザー操作が必要と表示された場合は、サイドパネルの「再翻訳」をクリックしてください。
 
 ### Ollama（ローカル、無料、オフラインで使える）
 
@@ -72,7 +76,7 @@ Microsoft の翻訳専用API（v3.0）です。こちらもモデル名や指示
 
 ## プライバシー
 
-- 翻訳したいテキストは、設定したモデル（ローカルのOllama、またはOpenAI/Anthropic等の外部API）に送信されます。機密情報を含むページを外部APIで翻訳する場合はご注意ください
+- Chrome内蔵翻訳とOllamaでは翻訳を端末内で処理します。OpenAI/Anthropic等の外部APIを選んだ場合は翻訳テキストがそのAPIに送信されるため、機密情報を含むページではご注意ください
 - APIキーは `chrome.storage.local`（この拡張機能専用のローカルストレージ）に保存されます。外部に送信されるのは設定した翻訳APIへのリクエストのみです
 - 翻訳結果はタブごとのキャッシュとして `chrome.storage.session`（ブラウザを閉じると消える）に保存されます
 
@@ -84,7 +88,7 @@ Microsoft の翻訳専用API（v3.0）です。こちらもモデル名や指示
 | `content.js` | 元ページに常駐。本文ブロックの抽出、複製HTMLの生成、ホバー/スクロール同期 |
 | `compose.js` | 訳文を元のDOM構造（リンク・強調など）に復元する |
 | `scrollsync.js` | 本文のスクロール領域を自動検出するロジック（`content.js`・`viewer.js` で共用） |
-| `translate.js` | 翻訳バックエンド（Ollama / OpenAI互換 / Anthropic / Google Cloud Translation / Azure AI Translator）の呼び出し |
+| `translate.js` | 翻訳バックエンド（Chrome内蔵翻訳 / Ollama / OpenAI互換 / Anthropic / Google Cloud Translation / Azure AI Translator）の呼び出し |
 | `viewer.js` / `viewer.html` / `viewer.css` | サイドパネル本体 |
 
 content.js と viewer.js 側の両方で、スクロール連動・モデル設定・プロファイル切り替えのロジックが動いています。詳しい設計意図は各ファイル冒頭のコメントを参照してください。

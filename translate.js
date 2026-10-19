@@ -1,6 +1,7 @@
 'use strict';
 
-// 翻訳バックエンド。5 種類のプロバイダーに対応する。DOM 非依存（Node からもテストできる）。
+// 翻訳バックエンド。6 種類のプロバイダーに対応する。DOM 非依存（Node からもテストできる）。
+//   - Chrome 内蔵 Translator API : Chrome 138+ でモデルを取得し、端末内で翻訳
 //   - Ollama + PLaMo-2-Translate: 専用の高品質ロジック（文分割・暴走検出・再試行）
 //   - Ollama + それ以外のモデル : Ollama 同梱のチャットテンプレートに素直な翻訳指示を渡す
 //   - OpenAI 互換 API          : OpenAI 本体・Groq・OpenRouter・DeepSeek・LM Studio 等
@@ -331,6 +332,97 @@
     Indonesian: 'id',
   };
 
+  // Chrome 138+ の内蔵 Translator / Language Detector API。モデルは Chrome が
+  // 言語ペアごとにダウンロードし、翻訳は端末内で実行する。
+  // create() の重複呼び出しを避けるため Promise 自体を言語ペアごとにキャッシュする。
+  const chromeTranslators = new Map();
+  let chromeDetectorPromise = null;
+
+  function normalizeLanguageCode(language) {
+    const code = LANG_CODES[language] || String(language || '').trim();
+    if (!code) return '';
+    try {
+      return new Intl.Locale(code).language;
+    } catch {
+      return code.toLowerCase().split(/[-_]/)[0];
+    }
+  }
+
+  function chromeApiError(err, fallbackCode = 'http') {
+    if (err instanceof TranslateError) return err;
+    const name = String(err?.name || '');
+    if (name === 'NotAllowedError') {
+      return new TranslateError('activation', 'ユーザー操作の中でモデル取得を開始する必要があります', true);
+    }
+    if (name === 'NotSupportedError') {
+      return new TranslateError('language', err.message || '言語ペアがサポートされていません', true);
+    }
+    return new TranslateError(fallbackCode, String(err?.message || err || 'Chrome内蔵翻訳でエラーが発生しました'), true);
+  }
+
+  async function detectChromeLanguage(text) {
+    if (!root.LanguageDetector) throw new TranslateError('unsupported', 'Language Detector API が利用できません', true);
+    try {
+      if (!chromeDetectorPromise) chromeDetectorPromise = root.LanguageDetector.create();
+      const detector = await chromeDetectorPromise;
+      const results = await detector.detect(text);
+      const language = results?.find((item) => item.detectedLanguage && item.detectedLanguage !== 'und')?.detectedLanguage;
+      if (!language) throw new TranslateError('language', '原文の言語を判定できませんでした', true);
+      return normalizeLanguageCode(language);
+    } catch (err) {
+      chromeDetectorPromise = null;
+      throw chromeApiError(err, 'download');
+    }
+  }
+
+  async function getChromeTranslator(source, target, opts) {
+    const key = `${source}>${target}`;
+    if (!chromeTranslators.has(key)) {
+      const creating = (async () => {
+        let availability;
+        try {
+          availability = await root.Translator.availability({ sourceLanguage: source, targetLanguage: target });
+        } catch (err) {
+          throw chromeApiError(err, 'language');
+        }
+        if (availability === 'unavailable') {
+          throw new TranslateError('language', `${source} → ${target} はChrome内蔵翻訳で利用できません`, true);
+        }
+        try {
+          return await root.Translator.create({
+            sourceLanguage: source,
+            targetLanguage: target,
+            monitor(monitor) {
+              monitor.addEventListener('downloadprogress', (event) => {
+                // Chrome は 0..1 の loaded、Edge は ProgressEvent 形式の loaded/total を返す。
+                const progress = event.total ? event.loaded / event.total : event.loaded;
+                opts.onDownloadProgress?.(Math.max(0, Math.min(1, progress)));
+              });
+            },
+          });
+        } catch (err) {
+          throw chromeApiError(err, 'download');
+        }
+      })();
+      chromeTranslators.set(key, creating);
+      creating.catch(() => chromeTranslators.delete(key));
+    }
+    return chromeTranslators.get(key);
+  }
+
+  async function translateChrome(text, target, opts) {
+    if (!root.Translator) throw new TranslateError('unsupported', 'Translator API が利用できません', true);
+    const targetCode = normalizeLanguageCode(target);
+    const sourceCode = normalizeLanguageCode(opts.sourceLanguage) || (await detectChromeLanguage(opts.sourceSample || text));
+    if (sourceCode === targetCode) return text;
+    const translator = await getChromeTranslator(sourceCode, targetCode, opts);
+    try {
+      return (await translator.translate(text)) || text;
+    } catch (err) {
+      throw chromeApiError(err);
+    }
+  }
+
   function langCodeFor(provider, target) {
     if (target === 'Chinese' && provider === 'azure') return 'zh-Hans';
     return LANG_CODES[target] || target;
@@ -400,6 +492,7 @@
    */
   async function translate(text, target, opts) {
     if (target === 'Japanese' && KANA.test(text)) return text; // すでに日本語
+    if (opts.provider === 'chrome') return translateChrome(text, target, opts);
     if (opts.provider === 'openai') return translateOpenAI(text, target, opts);
     if (opts.provider === 'anthropic') return translateAnthropic(text, target, opts);
     if (opts.provider === 'google') return translateGoogle(text, target, opts);
@@ -410,11 +503,15 @@
 
   /** 接続確認。Ollama 以外は事前チェックをせず、実際の翻訳リクエストのエラーで判断する。 */
   async function checkBackend(opts) {
+    if (opts.provider === 'chrome') {
+      if (!root.Translator) throw new TranslateError('unsupported', 'Translator API が利用できません', true);
+      return;
+    }
     if (opts.provider !== 'ollama') return;
     return checkOllama(opts);
   }
 
-  const api = { translate, checkBackend, TranslateError, splitSentences, looksRunaway, DEFAULT_TEMPLATE };
+  const api = { translate, checkBackend, TranslateError, splitSentences, looksRunaway, normalizeLanguageCode, DEFAULT_TEMPLATE };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.STTranslate = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

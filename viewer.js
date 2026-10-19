@@ -3,7 +3,7 @@
 // サイドパネル（翻訳側）。原文はアクティブタブのページそのもの。
 // 右側（このパネル）は、ページの複製（CSS・画像・リンクつき）の本文ブロックを訳文に差し替えたもの。
 //   - 複製は content.js が作り、iframe(sandbox, スクリプト無効) に読み込む
-//   - 翻訳は Ollama（ローカル）/ OpenAI 互換API / Anthropic から選べる。複数の設定を保存して切り替えられる
+//   - 翻訳は Chrome内蔵翻訳 / Ollama / 各種APIから選べる。複数の設定を保存して切り替えられる
 //   - 訳文の構造復元は compose.js
 //   - content.js とメッセージで「ホバー中のブロック」「スクロール位置」を同期する
 
@@ -29,6 +29,15 @@ const LANGS = [
 // プロバイダーごとの既定値。モデル設定を新規作成/プロバイダー切替したときに使う。
 // needsKey/needsModel/needsTemplate/needsRegion: 編集欄の各項目をそのプロバイダーで見せるか。
 const PROVIDER_DEFAULTS = {
+  chrome: {
+    label: 'ブラウザー内蔵翻訳',
+    url: '',
+    model: '',
+    needsKey: false,
+    needsModel: false,
+    needsTemplate: false,
+    needsRegion: false,
+  },
   ollama: {
     label: 'Ollama',
     url: 'http://localhost:11434',
@@ -157,7 +166,22 @@ function activeProfile() {
 const cfg = () => {
   const p = activeProfile();
   if (!p) return { provider: 'ollama', url: PROVIDER_DEFAULTS.ollama.url, apiKey: '', model: PROVIDER_DEFAULTS.ollama.model, template: '', region: '' };
-  return { provider: p.provider, url: p.url.replace(/\/+$/, ''), apiKey: p.apiKey, model: p.model, template: p.template, region: p.region };
+  return {
+    provider: p.provider,
+    url: (p.url || '').replace(/\/+$/, ''),
+    apiKey: p.apiKey,
+    model: p.model,
+    template: p.template,
+    region: p.region,
+    sourceLanguage: doc?.lang || '',
+    sourceSample: doc ? doc.blocks.slice(0, 20).map(sourceOf).join('\n').slice(0, 4000) : '',
+    onDownloadProgress: (loaded) => {
+      const percent = Math.round(loaded * 100);
+      statusEl.textContent = `内蔵翻訳モデルを取得中… ${percent}%`;
+      progressEl.classList.add('active');
+      progressEl.firstElementChild.style.width = `${percent}%`;
+    },
+  };
 };
 
 // ---------------------------------------------------------------------------
@@ -165,6 +189,20 @@ const cfg = () => {
 // ---------------------------------------------------------------------------
 function explain(err) {
   const { provider, url, model } = cfg();
+  if (provider === 'chrome') {
+    switch (err.code) {
+      case 'unsupported':
+        return 'ブラウザー内蔵翻訳を利用できません。Chrome 138 以降または対応版Edgeに更新するか、別のモデル設定を選んでください。';
+      case 'activation':
+        return '初回の翻訳モデル取得にはユーザー操作が必要です。上の「再翻訳」をクリックしてください。';
+      case 'language':
+        return String(err.message || 'この言語ペアはブラウザー内蔵翻訳で利用できません。');
+      case 'download':
+        return `内蔵翻訳モデルを取得できませんでした。ネットワークを確認して再翻訳してください。\n${err.message || ''}`.trim();
+      default:
+        return String(err?.message || err);
+    }
+  }
   if (provider === 'ollama') {
     switch (err.code) {
       case 'network':
@@ -810,7 +848,9 @@ function updateProviderVisibility(provider) {
   const plamo = isPlamoModel(provider, inModel.value);
   inTemplate.disabled = plamo || !d.needsTemplate;
   cfgHint.textContent =
-    provider === 'ollama'
+    provider === 'chrome'
+      ? 'Chrome 138 以降または対応版Edgeの内蔵 Translator API を使います。初回だけ言語モデルを取得し、翻訳は端末内で実行されます。APIキーとOllamaは不要です。'
+      : provider === 'ollama'
       ? plamo
         ? 'モデル名に "plamo" を含むため、PLaMo-2-Translate 専用の高品質な翻訳ロジックを使います。翻訳指示（テンプレート）はこのモデルでは使われないため編集できません。'
         : '下の翻訳指示を Ollama 標準のチャットテンプレートに渡して翻訳します。'
@@ -883,6 +923,10 @@ function originOf(url) {
   }
 }
 
+function providerNeedsHost(provider) {
+  return provider !== 'chrome';
+}
+
 async function hasHostPermission(url) {
   const origin = originOf(url);
   if (!origin) return false;
@@ -894,6 +938,7 @@ async function hasHostPermission(url) {
 }
 
 async function ensureHostPermission(url) {
+  if (!providerNeedsHost(selProvider.value)) return true;
   const origin = originOf(url);
   if (!origin) return false;
   if (await hasHostPermission(url)) return true;
@@ -1030,17 +1075,18 @@ $('#retry').addEventListener('click', () => translateAll(true));
     }
     if (migrated) await saveProfiles();
   } else {
-    // 旧バージョンは Ollama 固定の単一設定だった。あれば引き継いで1つのプロファイルにする
-    const legacy = makeProfile('ollama');
-    if (stored.url) legacy.url = stored.url;
-    if (stored.model) legacy.model = stored.model;
-    profiles = [legacy];
-    activeProfileId = legacy.id;
+    // 旧バージョンの Ollama 設定は引き継ぐ。完全な新規インストールでは
+    // 追加セットアップ不要の Chrome 内蔵翻訳を既定にする。
+    const initial = makeProfile(stored.url || stored.model ? 'ollama' : 'chrome');
+    if (stored.url) initial.url = stored.url;
+    if (stored.model) initial.model = stored.model;
+    profiles = [initial];
+    activeProfileId = initial.id;
     await saveProfiles();
   }
   populateProfileSelect();
   fillEditor(activeProfile());
-  if (!(await hasHostPermission(activeProfile().url))) {
+  if (providerNeedsHost(activeProfile().provider) && !(await hasHostPermission(activeProfile().url))) {
     setNotice(
       `「${activeProfile().name}」の接続先へのアクセスが許可されていません。モデル設定のURL欄を一度保存し直すと許可を求められます。`
     );
