@@ -115,6 +115,8 @@ const chatInput = $('#chat-input');
 const btnChatSend = $('#chat-send');
 const btnChatReset = $('#chat-reset');
 const btnChatClose = $('#chat-close');
+const btnChatSettings = $('#chat-settings');
+const chatResizer = $('#chat-resizer');
 const selChatProfile = $('#chat-profile');
 const selSl = $('#sl');
 const selTl = $('#tl');
@@ -1309,6 +1311,7 @@ function setToolbarOpen(open, save = true) {
   btnToolbarToggle.textContent = open ? '閉じる' : '設定';
   btnToolbarToggle.title = open ? 'ヘッダーを隠す' : '翻訳設定を表示';
   clampFloatingControl(btnToolbarToggle);
+  if (!chatPane.hidden && chatPane.style.flexBasis) setChatHeight(chatPane.getBoundingClientRect().height, false);
   if (save) chrome.storage.local.set({ toolbarOpen: open });
 }
 
@@ -1328,6 +1331,52 @@ function setChatOpen(open, save = true) {
     }
   }
   if (save) chrome.storage.local.set({ chatOpen: open });
+}
+
+function setChatHeight(height, save = true) {
+  const toolbarHeight = toolbar.hidden ? 0 : toolbar.getBoundingClientRect().height;
+  const max = Math.max(120, innerHeight - toolbarHeight - 80);
+  const value = Math.max(120, Math.min(Number(height) || 0, max));
+  chatPane.style.flexBasis = `${value}px`;
+  if (save) chrome.storage.local.set({ chatHeight: value });
+}
+
+function makeChatResizable(initialHeight) {
+  if (Number.isFinite(initialHeight)) setChatHeight(initialHeight, false);
+  let drag = null;
+  chatResizer.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    drag = { pointerId: event.pointerId, y: event.clientY, height: chatPane.getBoundingClientRect().height };
+    chatResizer.setPointerCapture(event.pointerId);
+    document.body.style.cursor = 'ns-resize';
+    event.preventDefault();
+  });
+  chatResizer.addEventListener('pointermove', (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    setChatHeight(drag.height + drag.y - event.clientY, false);
+  });
+  const finish = (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    drag = null;
+    document.body.style.cursor = '';
+    setChatHeight(chatPane.getBoundingClientRect().height);
+  };
+  chatResizer.addEventListener('pointerup', finish);
+  chatResizer.addEventListener('pointercancel', (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    drag = null;
+    document.body.style.cursor = '';
+  });
+  chatResizer.addEventListener('keydown', (event) => {
+    if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    event.preventDefault();
+    const delta = event.key === 'ArrowUp' ? 20 : -20;
+    setChatHeight(chatPane.getBoundingClientRect().height + delta);
+  });
+  chatResizer.addEventListener('dblclick', () => {
+    chatPane.style.flexBasis = '';
+    chrome.storage.local.remove('chatHeight');
+  });
 }
 
 function clampFloatingControl(button) {
@@ -1407,6 +1456,19 @@ chatInput.addEventListener('keydown', (event) => {
 });
 btnChatReset.addEventListener('click', resetLlmChat);
 btnChatClose.addEventListener('click', () => setChatOpen(false));
+btnChatSettings.addEventListener('click', () => {
+  const profile = chatProfile();
+  if (profile && profile.id !== BUILTIN_CHAT_ID && profile.id !== activeProfileId) {
+    activeProfileId = profile.id;
+    populateProfileSelect();
+    fillEditor(profile);
+    saveProfiles();
+  }
+  setToolbarOpen(true);
+  const settings = toolbar.querySelector('.settings');
+  settings.open = true;
+  (profile?.provider === 'chrome' ? selProvider : inModel).focus();
+});
 selChatProfile.addEventListener('change', async () => {
   if (chatBusy) {
     selChatProfile.value = activeChatProfileId;
@@ -1442,6 +1504,7 @@ $('#retry').addEventListener('click', () => translateAll(true));
     chatOpen: false,
     toolbarButtonPosition: null,
     chatButtonPosition: null,
+    chatHeight: null,
     profiles: null,
     activeProfileId: null,
     activeChatProfileId: BUILTIN_CHAT_ID,
@@ -1452,6 +1515,7 @@ $('#retry').addEventListener('click', () => translateAll(true));
   if (!selSl.value) selSl.value = 'auto';
   selTl.value = stored.target;
   chkSync.checked = stored.sync;
+  makeChatResizable(stored.chatHeight);
   makeFloatingControlDraggable(
     btnToolbarToggle,
     'toolbarButtonPosition',
@@ -1469,6 +1533,7 @@ $('#retry').addEventListener('click', () => translateAll(true));
   addEventListener('resize', () => {
     clampFloatingControl(btnToolbarToggle);
     clampFloatingControl(btnChatToggle);
+    if (chatPane.style.flexBasis) setChatHeight(chatPane.getBoundingClientRect().height, false);
   });
 
   if (Array.isArray(stored.profiles) && stored.profiles.length) {

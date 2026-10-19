@@ -300,16 +300,40 @@ body {
   white-space: pre-wrap;
 }
 
-/* ---- Local LLM チャット ---- */
+/* ---- LLM チャット ---- */
 #chat-pane {
   flex: 0 0 min(46%, 440px);
-  min-height: 190px;
+  min-height: 120px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   background: var(--pane);
   border-top: 1px solid var(--border);
   font-size: 13px;
+}
+
+#chat-resizer {
+  flex: none;
+  height: 7px;
+  margin-top: -4px;
+  cursor: ns-resize;
+  touch-action: none;
+  background: transparent;
+}
+
+#chat-resizer::after {
+  content: '';
+  display: block;
+  width: 38px;
+  height: 3px;
+  margin: 2px auto;
+  border-radius: 2px;
+  background: var(--border);
+}
+
+#chat-resizer:hover::after,
+#chat-resizer:focus-visible::after {
+  background: var(--accent);
 }
 
 .chat-header {

@@ -72,6 +72,7 @@
       sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
 
     <section id="chat-pane" aria-label="LLMチャット" hidden>
+      <div id="chat-resizer" role="separator" aria-orientation="horizontal" aria-label="チャットの高さを変更" tabindex="0"></div>
       <header class="chat-header">
         <div class="chat-heading">
           <strong>LLMチャット</strong>
@@ -79,6 +80,7 @@
           <span id="chat-domain"></span>
         </div>
         <div class="chat-actions">
+          <button id="chat-settings" type="button">モデル設定</button>
           <button id="chat-reset" type="button">会話をリセット</button>
           <button id="chat-close" type="button" aria-label="チャットを閉じる">×</button>
         </div>
