@@ -105,6 +105,17 @@ const emptyEl = $('#empty');
 const titleEl = $('#page-title');
 const toolbar = $('#toolbar');
 const btnToolbarToggle = $('#toolbar-toggle');
+const btnChatToggle = $('#chat-toggle');
+const chatPane = $('#chat-pane');
+const chatDomainEl = $('#chat-domain');
+const chatMessagesEl = $('#chat-messages');
+const chatStatusEl = $('#chat-status');
+const chatForm = $('#chat-form');
+const chatInput = $('#chat-input');
+const btnChatSend = $('#chat-send');
+const btnChatReset = $('#chat-reset');
+const btnChatClose = $('#chat-close');
+const selChatProfile = $('#chat-profile');
 const selSl = $('#sl');
 const selTl = $('#tl');
 const chkSync = $('#sync');
@@ -134,7 +145,7 @@ const btnDelete = $('#cfg-delete');
 
 inTemplate.placeholder = STTranslate.DEFAULT_TEMPLATE;
 
-const { translate, checkBackend: apiCheckBackend } = STTranslate;
+const { translate, chat: apiChat, checkBackend: apiCheckBackend } = STTranslate;
 const C = PlamoCompose;
 
 let tabId = null; // このパネルが紐づくタブ（?tab= で渡される）
@@ -150,6 +161,11 @@ let profiles = []; // 保存されたモデル設定 [{ id, name, provider, url,
 let activeProfileId = null;
 const stores = new Map(); // `${docId}|${profileId}|${lang}` -> string[]
 const textCache = new Map(); // `${profileId}|${lang}|${原文}` -> 訳（再抽出・パネルの開き直しをまたいで使い回す）
+const BUILTIN_CHAT_ID = '__chrome_builtin_llm__';
+const llmStates = new Map(); // domain + chat profile -> { history, session, creating, loaded }
+let activeChatDomain = '';
+let activeChatProfileId = BUILTIN_CHAT_ID;
+let chatBusy = false;
 
 // 複製（iframe）側
 let frameToken = 0;
@@ -329,6 +345,230 @@ function currentStore(force) {
 }
 
 // ---------------------------------------------------------------------------
+// Local LLM チャット（Chrome Prompt API / Gemini Nano）
+// ---------------------------------------------------------------------------
+const MAX_CHAT_MESSAGES = 16;
+const MAX_CHAT_CONTEXT = 12000;
+
+function domainOf(url) {
+  try {
+    return new URL(url).hostname || 'local';
+  } catch {
+    return 'unknown';
+  }
+}
+
+const llmStateId = (domain, profileId = activeChatProfileId) => `${domain}|${profileId}`;
+const llmHistoryKey = (domain, profileId = activeChatProfileId) => `llm-chat:${llmStateId(domain, profileId)}`;
+
+async function llmState(domain, profileId = activeChatProfileId) {
+  const id = llmStateId(domain, profileId);
+  if (!llmStates.has(id)) llmStates.set(id, { history: [], session: null, creating: null, loaded: false });
+  const state = llmStates.get(id);
+  if (!state.loaded) {
+    const key = llmHistoryKey(domain, profileId);
+    const stored = await chrome.storage.session.get(key);
+    const history = stored[key];
+    if (Array.isArray(history)) state.history = history.slice(-MAX_CHAT_MESSAGES);
+    state.loaded = true;
+  }
+  return state;
+}
+
+function appendChatMessage(role, text) {
+  const el = document.createElement('div');
+  el.className = `chat-message ${role}`;
+  el.textContent = text;
+  chatMessagesEl.append(el);
+  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+  return el;
+}
+
+function renderChatHistory(history) {
+  chatMessagesEl.replaceChildren();
+  for (const item of history) appendChatMessage(item.role, item.content);
+}
+
+async function switchChatDomain(d) {
+  activeChatDomain = d ? domainOf(d.url) : '';
+  chatDomainEl.textContent = activeChatDomain;
+  chatStatusEl.textContent = '';
+  chatStatusEl.classList.remove('error');
+  if (!activeChatDomain) return renderChatHistory([]);
+  const expectedDomain = activeChatDomain;
+  const expectedProfile = activeChatProfileId;
+  const state = await llmState(expectedDomain, expectedProfile);
+  if (activeChatDomain === expectedDomain && activeChatProfileId === expectedProfile) renderChatHistory(state.history);
+}
+
+function chatProfile() {
+  if (activeChatProfileId === BUILTIN_CHAT_ID) return { id: BUILTIN_CHAT_ID, provider: 'chrome', name: 'Chrome内蔵 Local LLM' };
+  return profiles.find((p) => p.id === activeChatProfileId) || null;
+}
+
+function populateChatProfileSelect() {
+  const supported = profiles.filter((p) => ['ollama', 'openai', 'anthropic'].includes(p.provider));
+  const previous = activeChatProfileId;
+  selChatProfile.replaceChildren(
+    new Option('Chrome内蔵 Local LLM', BUILTIN_CHAT_ID),
+    ...supported.map((p) => new Option(p.name || '(無題)', p.id))
+  );
+  if (![BUILTIN_CHAT_ID, ...supported.map((p) => p.id)].includes(activeChatProfileId)) activeChatProfileId = BUILTIN_CHAT_ID;
+  selChatProfile.value = activeChatProfileId;
+  if (activeChatProfileId !== previous) {
+    chrome.storage.local.set({ activeChatProfileId });
+    if (doc) switchChatDomain(doc);
+  }
+}
+
+function chatContext() {
+  if (!doc) return '';
+  const selected = String(fwin?.getSelection?.() || '').trim();
+  const start = Math.max(0, anchor - 8);
+  const end = Math.min(doc.blocks.length, anchor + 9);
+  const parts = [];
+  if (selected) parts.push(`[選択中の文章]\n${selected}`);
+  for (let i = start; i < end; i++) {
+    const source = sourceOf(doc.blocks[i]).split(C.SEP).join(' ').trim();
+    if (!source) continue;
+    const translated = curStore[i]?.split(C.SEP).join(' ').trim();
+    parts.push(`[ブロック ${i + 1} / 原文]\n${source}${translated ? `\n[訳文]\n${translated}` : ''}`);
+  }
+  return parts.join('\n\n').slice(0, MAX_CHAT_CONTEXT);
+}
+
+function llmErrorMessage(err, provider) {
+  if (provider === 'chrome' && !globalThis.LanguageModel) return 'Local LLM は対応版Chromeの拡張機能でのみ利用できます。';
+  if (err?.name === 'NotAllowedError') return '初回のモデル取得にはユーザー操作が必要です。もう一度「送信」を押してください。';
+  if (err?.name === 'QuotaExceededError') return '会話が長くなりました。会話をリセットしてください。';
+  return String(err?.message || err || 'Local LLM でエラーが発生しました。');
+}
+
+function chatSystemPrompt(domain) {
+  return (
+    `あなたは ${domain} の文章を読む人の補助者です。日本語で簡潔に回答してください。` +
+    '与えられたページ文脈と会話だけを根拠にし、外部検索をしたように装わないでください。' +
+    '文脈から判断できない場合は、その旨を明示してください。'
+  );
+}
+
+async function createLlmSession(state, domain, profileId) {
+  if (!globalThis.LanguageModel) throw new Error('LanguageModel API が利用できません');
+  if (state.session) return state.session;
+  if (!state.creating) {
+    state.creating = (async () => {
+      try {
+        const availability = await LanguageModel.availability();
+        if (availability === 'unavailable') throw new Error('この端末でLocal LLMを利用できません（メモリ・CPU/GPU・空き容量を確認してください）');
+        const initialPrompts = [
+          {
+            role: 'system',
+            content: chatSystemPrompt(domain),
+          },
+          ...state.history.slice(-10).map((item) => ({ role: item.role, content: item.content })),
+        ];
+        state.session = await LanguageModel.create({
+          initialPrompts,
+          monitor(monitor) {
+            monitor.addEventListener('downloadprogress', (event) => {
+              const loaded = event.total ? event.loaded / event.total : event.loaded;
+              if (activeChatDomain === domain && activeChatProfileId === profileId) {
+                chatStatusEl.textContent = `Local LLM モデルを取得中… ${Math.round(loaded * 100)}%`;
+              }
+            });
+          },
+        });
+        return state.session;
+      } finally {
+        state.creating = null;
+      }
+    })();
+  }
+  return state.creating;
+}
+
+async function askLlm(question) {
+  if (!doc || !activeChatDomain || chatBusy) return;
+  const askedDomain = activeChatDomain;
+  const askedProfileId = activeChatProfileId;
+  const profile = chatProfile();
+  if (!profile) return;
+  const askedDoc = doc;
+  const context = chatContext();
+  chatBusy = true;
+  chatInput.disabled = true;
+  btnChatSend.disabled = true;
+  chatStatusEl.classList.remove('error');
+  chatStatusEl.textContent = '準備中…';
+  appendChatMessage('user', question);
+  const answerEl = appendChatMessage('assistant', '');
+  try {
+    const state = await llmState(askedDomain, askedProfileId);
+    const prompt = `[現在のページ]\n${askedDoc.title || ''}\n${askedDoc.url}\n\n[関連する原文と訳文]\n${context}\n\n[質問]\n${question}`;
+    if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) chatStatusEl.textContent = '回答中…';
+    let answer = '';
+    if (profile.provider === 'chrome') {
+      const session = await createLlmSession(state, askedDomain, askedProfileId);
+      if (session.promptStreaming) {
+        for await (const chunk of session.promptStreaming(prompt)) {
+          answer += chunk;
+          answerEl.textContent = answer;
+          chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+        }
+      } else {
+        answer = await session.prompt(prompt);
+      }
+    } else {
+      answer = await apiChat(
+        [
+          { role: 'system', content: chatSystemPrompt(askedDomain) },
+          ...state.history.slice(-10),
+          { role: 'user', content: prompt },
+        ],
+        {
+          provider: profile.provider,
+          url: (profile.url || '').replace(/\/+$/, ''),
+          apiKey: profile.apiKey || '',
+          model: profile.model || '',
+        }
+      );
+    }
+    answerEl.textContent = answer;
+    if (!answer.trim()) answer = answerEl.textContent = '回答を生成できませんでした。';
+    state.history.push({ role: 'user', content: question }, { role: 'assistant', content: answer });
+    state.history = state.history.slice(-MAX_CHAT_MESSAGES);
+    await chrome.storage.session.set({ [llmHistoryKey(askedDomain, askedProfileId)]: state.history });
+    if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) {
+      chatStatusEl.textContent = profile.provider === 'chrome' ? 'ローカルで回答しました' : `${profile.name} で回答しました`;
+    }
+  } catch (err) {
+    answerEl.remove();
+    if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) {
+      chatStatusEl.textContent = llmErrorMessage(err, profile.provider);
+      chatStatusEl.classList.add('error');
+    }
+    console.warn('LLM chat failed', err);
+  } finally {
+    chatBusy = false;
+    chatInput.disabled = false;
+    btnChatSend.disabled = false;
+    if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) chatInput.focus();
+  }
+}
+
+async function resetLlmChat() {
+  if (!activeChatDomain || chatBusy) return;
+  const state = await llmState(activeChatDomain, activeChatProfileId);
+  state.session?.destroy?.();
+  state.session = null;
+  state.creating = null;
+  state.history = [];
+  await chrome.storage.session.remove(llmHistoryKey(activeChatDomain, activeChatProfileId));
+  renderChatHistory([]);
+  chatStatusEl.textContent = '会話をリセットしました';
+}
+
+// ---------------------------------------------------------------------------
 // 表示（ツールバー）
 // ---------------------------------------------------------------------------
 function setNotice(message) {
@@ -341,6 +581,7 @@ function setNotice(message) {
 
 function showEmpty(message) {
   doc = null;
+  switchChatDomain(null);
   run++;
   frameToken++;
   ready = false;
@@ -787,6 +1028,7 @@ async function applyDoc(d) {
     return;
   }
   doc = d;
+  switchChatDomain(d);
   curStore = [];
   stateArr = d.blocks.map(() => 'pending');
   titleEl.textContent = d.title || d.url;
@@ -846,6 +1088,7 @@ function saveProfiles() {
 function populateProfileSelect() {
   selProfile.replaceChildren(...profiles.map((p) => new Option(p.name || '(無題)', p.id)));
   selProfile.value = activeProfileId;
+  populateChatProfileSelect();
 }
 
 /** PLaMo-2-Translate は専用の固定プロンプトを使うため、翻訳指示（テンプレート）を無視する。 */
@@ -1065,10 +1308,122 @@ function setToolbarOpen(open, save = true) {
   btnToolbarToggle.setAttribute('aria-expanded', String(open));
   btnToolbarToggle.textContent = open ? '閉じる' : '設定';
   btnToolbarToggle.title = open ? 'ヘッダーを隠す' : '翻訳設定を表示';
+  clampFloatingControl(btnToolbarToggle);
   if (save) chrome.storage.local.set({ toolbarOpen: open });
 }
 
-btnToolbarToggle.addEventListener('click', () => setToolbarOpen(toolbar.hidden));
+function setChatOpen(open, save = true) {
+  chatPane.hidden = !open;
+  btnChatToggle.hidden = open; // 開いている間は入力欄に重ねず、ヘッダーの × で閉じる
+  btnChatToggle.setAttribute('aria-expanded', String(open));
+  btnChatToggle.textContent = 'AI';
+  btnChatToggle.title = 'LLMチャットを開く';
+  clampFloatingControl(btnChatToggle);
+  if (open) {
+    if (!doc) {
+      chatStatusEl.textContent = '先に翻訳するページを開いてください。';
+      chatStatusEl.classList.add('error');
+    } else {
+      chatInput.focus();
+    }
+  }
+  if (save) chrome.storage.local.set({ chatOpen: open });
+}
+
+function clampFloatingControl(button) {
+  if (!button.style.left || !button.style.top) return;
+  const rect = button.getBoundingClientRect();
+  const left = Math.max(2, Math.min(parseFloat(button.style.left), innerWidth - rect.width - 2));
+  const top = Math.max(2, Math.min(parseFloat(button.style.top), innerHeight - rect.height - 2));
+  button.style.left = `${left}px`;
+  button.style.top = `${top}px`;
+}
+
+function placeFloatingControl(button, position) {
+  if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) return;
+  const rect = button.getBoundingClientRect();
+  button.style.right = 'auto';
+  button.style.bottom = 'auto';
+  button.style.left = `${Math.max(2, position.x * Math.max(1, innerWidth - rect.width))}px`;
+  button.style.top = `${Math.max(2, position.y * Math.max(1, innerHeight - rect.height))}px`;
+  clampFloatingControl(button);
+}
+
+function makeFloatingControlDraggable(button, storageKey, onActivate, initialPosition) {
+  placeFloatingControl(button, initialPosition);
+  let drag = null;
+  button.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    const rect = button.getBoundingClientRect();
+    drag = { pointerId: event.pointerId, x: event.clientX, y: event.clientY, left: rect.left, top: rect.top, moved: false };
+    button.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  });
+  button.addEventListener('pointermove', (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (Math.hypot(dx, dy) > 4) drag.moved = true;
+    if (!drag.moved) return;
+    button.style.right = 'auto';
+    button.style.bottom = 'auto';
+    button.style.left = `${drag.left + dx}px`;
+    button.style.top = `${drag.top + dy}px`;
+    clampFloatingControl(button);
+  });
+  const finish = (event) => {
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const moved = drag.moved;
+    drag = null;
+    if (moved) {
+      const rect = button.getBoundingClientRect();
+      const position = {
+        x: rect.left / Math.max(1, innerWidth - rect.width),
+        y: rect.top / Math.max(1, innerHeight - rect.height),
+      };
+      chrome.storage.local.set({ [storageKey]: position });
+    } else {
+      onActivate();
+    }
+  };
+  button.addEventListener('pointerup', finish);
+  button.addEventListener('pointercancel', () => (drag = null));
+  // キーボード操作での click は pointerup がないためここで処理する。
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    if (event.detail === 0) onActivate();
+  });
+}
+
+chatForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  const question = chatInput.value.trim();
+  if (!question) return;
+  chatInput.value = '';
+  askLlm(question);
+});
+chatInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) chatForm.requestSubmit();
+});
+btnChatReset.addEventListener('click', resetLlmChat);
+btnChatClose.addEventListener('click', () => setChatOpen(false));
+selChatProfile.addEventListener('change', async () => {
+  if (chatBusy) {
+    selChatProfile.value = activeChatProfileId;
+    return;
+  }
+  const next = selChatProfile.value;
+  const profile = profiles.find((p) => p.id === next);
+  if (profile && providerNeedsHost(profile.provider) && !(await ensureHostPermission(profile.url))) {
+    selChatProfile.value = activeChatProfileId;
+    chatStatusEl.textContent = 'この接続先へのアクセス許可が必要です。';
+    chatStatusEl.classList.add('error');
+    return;
+  }
+  activeChatProfileId = next;
+  await chrome.storage.local.set({ activeChatProfileId });
+  switchChatDomain(doc);
+});
 
 selSl.addEventListener('change', () => (savePrefs(), translateAll(true)));
 selTl.addEventListener('change', () => (savePrefs(), translateAll()));
@@ -1084,8 +1439,12 @@ $('#retry').addEventListener('click', () => translateAll(true));
     target: 'Japanese',
     sync: true,
     toolbarOpen: false,
+    chatOpen: false,
+    toolbarButtonPosition: null,
+    chatButtonPosition: null,
     profiles: null,
     activeProfileId: null,
+    activeChatProfileId: BUILTIN_CHAT_ID,
     url: null, // 旧バージョン（単一設定）からの移行用
     model: null,
   });
@@ -1093,7 +1452,24 @@ $('#retry').addEventListener('click', () => translateAll(true));
   if (!selSl.value) selSl.value = 'auto';
   selTl.value = stored.target;
   chkSync.checked = stored.sync;
+  makeFloatingControlDraggable(
+    btnToolbarToggle,
+    'toolbarButtonPosition',
+    () => setToolbarOpen(toolbar.hidden),
+    stored.toolbarButtonPosition
+  );
+  makeFloatingControlDraggable(
+    btnChatToggle,
+    'chatButtonPosition',
+    () => setChatOpen(chatPane.hidden),
+    stored.chatButtonPosition
+  );
   setToolbarOpen(stored.toolbarOpen, false);
+  setChatOpen(stored.chatOpen, false);
+  addEventListener('resize', () => {
+    clampFloatingControl(btnToolbarToggle);
+    clampFloatingControl(btnChatToggle);
+  });
 
   if (Array.isArray(stored.profiles) && stored.profiles.length) {
     profiles = stored.profiles;
@@ -1119,6 +1495,9 @@ $('#retry').addEventListener('click', () => translateAll(true));
     await saveProfiles();
   }
   populateProfileSelect();
+  activeChatProfileId = stored.activeChatProfileId;
+  populateChatProfileSelect();
+  switchChatDomain(doc);
   fillEditor(activeProfile());
   if (providerNeedsHost(activeProfile().provider) && !(await hasHostPermission(activeProfile().url))) {
     setNotice(

@@ -7,7 +7,8 @@
     <link rel="stylesheet" href="viewer.css" />
   </head>
   <body>
-    <button id="toolbar-toggle" type="button" aria-controls="toolbar" aria-expanded="false">設定</button>
+    <button id="toolbar-toggle" class="floating-control" type="button" aria-controls="toolbar" aria-expanded="false">設定</button>
+    <button id="chat-toggle" class="floating-control" type="button" aria-controls="chat-pane" aria-expanded="false">AI</button>
     <header class="bar" id="toolbar" hidden>
       <div class="row">
         <a id="page-title" target="_blank" rel="noopener"></a>
@@ -69,6 +70,26 @@
          allow-same-origin: パネル側から DOM を書き換えるために必要 / allow-popups: リンクを新しいタブで開く -->
     <iframe id="frame" title="翻訳文" hidden
       sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+
+    <section id="chat-pane" aria-label="LLMチャット" hidden>
+      <header class="chat-header">
+        <div class="chat-heading">
+          <strong>LLMチャット</strong>
+          <select id="chat-profile" aria-label="チャットモデル設定"></select>
+          <span id="chat-domain"></span>
+        </div>
+        <div class="chat-actions">
+          <button id="chat-reset" type="button">会話をリセット</button>
+          <button id="chat-close" type="button" aria-label="チャットを閉じる">×</button>
+        </div>
+      </header>
+      <div id="chat-messages" role="log" aria-live="polite"></div>
+      <div id="chat-status" aria-live="polite"></div>
+      <form id="chat-form">
+        <textarea id="chat-input" rows="2" placeholder="このページの分からない箇所を質問…" required></textarea>
+        <button id="chat-send" type="submit">送信</button>
+      </form>
+    </section>
 
     <script src="translate.js"></script>
     <script src="compose.js"></script>

@@ -312,6 +312,94 @@
   }
 
   // ===========================================================================
+  // 汎用チャット（Ollama / OpenAI互換 / Anthropic）
+  // Google / Azure は翻訳専用APIのため対象外。Chrome内蔵Prompt APIは、ストリーミングと
+  // セッション管理を行う viewer.js 側で扱う。
+  // ===========================================================================
+  async function chatOllama(messages, opts) {
+    let res;
+    try {
+      res = await fetch(`${opts.url}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: opts.model,
+          messages,
+          stream: false,
+          keep_alive: '30m',
+          options: { temperature: opts.temperature ?? 0.2, num_predict: 2048 },
+        }),
+      });
+    } catch {
+      throw new TranslateError('network', 'Ollama に接続できません', true);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 403) throw new TranslateError('forbidden', 'Ollama が拡張機能からのアクセスを拒否しました（403）', true);
+    if (!res.ok) {
+      const msg = String(data.error || `HTTP ${res.status}`);
+      if (res.status === 404) throw new TranslateError('model', msg, true);
+      throw new TranslateError('http', `Ollama がエラーを返しました: ${msg}`);
+    }
+    return String(data.message?.content || '').trim();
+  }
+
+  async function chatOpenAI(messages, opts) {
+    let res;
+    try {
+      res = await fetch(`${opts.url}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${opts.apiKey || ''}` },
+        body: JSON.stringify({ model: opts.model, temperature: opts.temperature ?? 0.2, max_tokens: 2048, messages }),
+      });
+    } catch {
+      throw new TranslateError('network', 'APIに接続できません（URL・ネットワーク・拡張機能へのアクセス許可を確認してください）', true);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401 || res.status === 403) throw new TranslateError('forbidden', 'APIキーが拒否されました', true);
+    if (!res.ok) {
+      const msg = String(data.error?.message || data.error || `HTTP ${res.status}`);
+      if (res.status === 404) throw new TranslateError('model', msg, true);
+      throw new TranslateError('http', `APIがエラーを返しました: ${msg}`);
+    }
+    return String(data.choices?.[0]?.message?.content || '').trim();
+  }
+
+  async function chatAnthropic(messages, opts) {
+    const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+    const conversation = messages.filter((m) => m.role !== 'system');
+    let res;
+    try {
+      res = await fetch(`${opts.url}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': opts.apiKey || '',
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({ model: opts.model, max_tokens: 2048, temperature: opts.temperature ?? 0.2, system, messages: conversation }),
+      });
+    } catch {
+      throw new TranslateError('network', 'APIに接続できません（URL・ネットワーク・拡張機能へのアクセス許可を確認してください）', true);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 401 || res.status === 403) throw new TranslateError('forbidden', 'APIキーが拒否されました', true);
+    if (!res.ok) {
+      const msg = String(data.error?.message || data.error || `HTTP ${res.status}`);
+      if (res.status === 404) throw new TranslateError('model', msg, true);
+      throw new TranslateError('http', `APIがエラーを返しました: ${msg}`);
+    }
+    return (data.content || []).map((c) => c.text || '').join('').trim();
+  }
+
+  async function chat(messages, opts) {
+    if (opts.provider === 'ollama') return chatOllama(messages, opts);
+    if (opts.provider === 'openai') return chatOpenAI(messages, opts);
+    if (opts.provider === 'anthropic') return chatAnthropic(messages, opts);
+    throw new TranslateError('unsupported', 'この接続設定はチャットに対応していません', true);
+  }
+
+  // ===========================================================================
   // 言語名 → 言語コード（Google Cloud Translation / Azure AI Translator 用）
   //   LANGS（viewer.js）の value（英語の言語名）をそのまま渡しても通らないため変換する。
   //   中国語だけ Google と Azure で書式が違う（zh-CN / zh-Hans）。
@@ -540,7 +628,7 @@
     return checkOllama(opts);
   }
 
-  const api = { translate, checkBackend, TranslateError, splitSentences, looksRunaway, normalizeLanguageCode, DEFAULT_TEMPLATE };
+  const api = { translate, chat, checkBackend, TranslateError, splitSentences, looksRunaway, normalizeLanguageCode, DEFAULT_TEMPLATE };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.STTranslate = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this);
