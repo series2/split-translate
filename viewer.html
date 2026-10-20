@@ -83,7 +83,7 @@
           <button id="chat-cfg-refresh-models" type="button" aria-label="Ollamaのモデル一覧を更新" title="Ollamaのインストール済みモデル一覧を取得">↻</button>
         </label>
         <datalist id="chat-cfg-model-list"></datalist>
-        <label>ページ文脈の最大文字数（0でなし）
+        <label title="JavaScriptの文字数です。モデル内部のトークン数ではありません">ページ文脈の最大文字数（0でなし）
           <input id="chat-cfg-context-limit" type="number" min="0" max="50000" step="500" />
         </label>
         <p class="hint" id="chat-cfg-hint"></p>
@@ -130,7 +130,7 @@
         <section>
           <strong>ページ文脈の選び方</strong>
           <p>選択中の文章を最優先し、次に質問の語句と一致する原文・訳文を選びます。一致がない場合は現在表示中の前後を使い、単純な挨拶ではページ文脈を付けません。</p>
-          <p>「モデル設定」の最大文字数が上限です。0にすると文脈を送りません。外部APIを選ぶと、選ばれた文脈・質問・会話履歴が設定先へ送信されます。</p>
+          <p>「モデル設定」の上限は文字数であり、モデル内部のトークン数ではありません。0にすると文脈を送りません。外部APIを選ぶと、選ばれた文脈・質問・会話履歴が設定先へ送信されます。</p>
         </section>
       </aside>
       <div id="chat-messages" role="log" aria-live="polite" aria-relevant="additions text"></div>

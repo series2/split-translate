@@ -753,6 +753,7 @@ async function askLlm(question) {
   let stopReason = '';
   let timeout = null;
   const startResponseTimeout = () => {
+    clearTimeout(timeout);
     timeout = setTimeout(() => {
       stopReason = 'timeout';
       controller.abort();
@@ -781,12 +782,31 @@ async function askLlm(question) {
     if (profile.provider === 'chrome') {
       const session = await createLlmSession(state, askedDomain, askedProfileId, controller.signal);
       if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) {
-        chatStatusEl.textContent = context ? `回答中…（ページ文脈 ${context.length.toLocaleString()}文字）` : '回答中…（ページ文脈なし）';
+        chatStatusEl.textContent = context ? `回答を生成中…（ページ文脈 ${context.length.toLocaleString()}文字）` : '回答を生成中…（ページ文脈なし）';
       }
       startResponseTimeout();
-      // 一部のChrome環境で promptStreaming() が最初のチャンクを返さないことがあるため、
-      // 短い対話では安定して完了を検知できる prompt() を使う。
-      answer = await session.prompt(prompt, { signal: controller.signal });
+      const stream = session.promptStreaming(prompt, { signal: controller.signal });
+      let renderFrame = 0;
+      const renderPartial = () => {
+        if (renderFrame) return;
+        renderFrame = requestAnimationFrame(() => {
+          renderFrame = 0;
+          renderMarkdown(answerEl, answer);
+          chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+        });
+      };
+      try {
+        for await (const chunk of stream) {
+          // 現行Chromeは文字列を返す。将来のtyped chunkもテキストだけ受け取れるようにする。
+          const text = typeof chunk === 'string' ? chunk : chunk?.type === 'text' ? chunk.value : '';
+          if (!text) continue;
+          answer += text;
+          startResponseTimeout(); // ストリーミング中は「全体時間」ではなく無応答時間を監視する。
+          renderPartial();
+        }
+      } finally {
+        if (renderFrame) cancelAnimationFrame(renderFrame);
+      }
     } else {
       if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) {
         chatStatusEl.textContent = context ? `回答中…（ページ文脈 ${context.length.toLocaleString()}文字）` : '回答中…（ページ文脈なし）';
