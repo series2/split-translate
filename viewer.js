@@ -94,13 +94,19 @@ const CONCURRENCY = 2;
 const MAX_CACHE_ENTRIES = 4000;
 const DEFAULT_CHAT_CONTEXT_CHARS = 4000;
 const CHAT_TIMEOUT_MS = 90000;
+const LOCAL_LLM_OPTIONS = {
+  // Chrome Prompt API が現在サポートするテキスト言語。システム指示と通常の質問は日本語、
+  // ページ本文には英語などが混ざるため、availability() と create() の両方へ同じ宣言を渡す。
+  expectedInputs: [{ type: 'text', languages: ['ja', 'en', 'es', 'de', 'fr'] }],
+  expectedOutputs: [{ type: 'text', languages: ['ja'] }],
+};
 
 // 複製の中に差し込むスタイル（ホバー・状態表示・再翻訳ボタン）
 const FRAME_CSS = `
 [data-st-hl]{background-color:rgba(250,204,21,.4)!important;outline:2px solid rgba(234,179,8,.9)!important;outline-offset:2px!important;border-radius:3px}
 [data-st-state=pending],[data-st-state=busy]{opacity:.55!important}
 [data-st-state=error]{outline:2px dashed #d93025!important;outline-offset:2px!important;cursor:pointer!important}
-#st-retry{all:initial;position:fixed;z-index:2147483647;display:none;width:24px;height:24px;font:15px/22px sans-serif;text-align:center;color:#555;background:#fff;border:1px solid #bbb;border-radius:6px;cursor:pointer;opacity:.72;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+#st-retry{all:initial;position:fixed;z-index:2147483647;display:none;box-sizing:border-box;width:28px;height:28px;font:15px/26px sans-serif;text-align:center;color:#555;background:#fff;border:1px solid #bbb;border-radius:6px;cursor:pointer;opacity:.72;box-shadow:0 1px 3px rgba(0,0,0,.25)}
 #st-retry:hover{color:#2563eb;border-color:#2563eb;opacity:1}
 `;
 
@@ -206,6 +212,7 @@ let fwin = null;
 let els = []; // 複製内のブロック要素（index = ブロック番号）
 let origNodes = []; // 各ブロックの元の子ノード（差し替え前に退避）
 let retryBtn = null;
+let retryIdx = null; // ボタン表示後にホバー先が変化しても、クリック対象を明示的に保持する
 let fMainScroller = null; // 複製内で実際にスクロールしている要素（null = フレーム自体がスクロールする）
 let fSyncable = []; // スクロール位置合わせに使えるブロックか（ScrollSync.detect の結果。index = ブロック番号）
 let scrollerReady = false; // fMainScroller を検出済みか
@@ -531,8 +538,16 @@ async function createLlmSession(state, domain, profileId, signal) {
   if (!state.creating) {
     state.creating = (async () => {
       try {
-        const availability = await LanguageModel.availability();
+        const availability = await LanguageModel.availability(LOCAL_LLM_OPTIONS);
         if (availability === 'unavailable') throw new Error('この端末でLocal LLMを利用できません（メモリ・CPU/GPU・空き容量を確認してください）');
+        if (activeChatDomain === domain && activeChatProfileId === profileId) {
+          chatStatusEl.textContent =
+            availability === 'downloadable'
+              ? 'Local LLM モデルのダウンロードを開始しています…（初回は数分かかることがあります）'
+              : availability === 'downloading'
+              ? 'Local LLM モデルをダウンロード中…（初回は数分かかることがあります）'
+              : 'Local LLM モデルを読み込み中…';
+        }
         const initialPrompts = [
           {
             role: 'system',
@@ -541,13 +556,16 @@ async function createLlmSession(state, domain, profileId, signal) {
           ...state.history.slice(-10).map((item) => ({ role: item.role, content: item.content })),
         ];
         state.session = await LanguageModel.create({
+          ...LOCAL_LLM_OPTIONS,
           signal,
           initialPrompts,
           monitor(monitor) {
             monitor.addEventListener('downloadprogress', (event) => {
               const loaded = event.total ? event.loaded / event.total : event.loaded;
               if (activeChatDomain === domain && activeChatProfileId === profileId) {
-                chatStatusEl.textContent = `Local LLM モデルを取得中… ${Math.round(loaded * 100)}%`;
+                chatStatusEl.textContent = Number.isFinite(loaded)
+                  ? `Local LLM モデルをダウンロード中… ${Math.round(loaded * 100)}%`
+                  : 'Local LLM モデルをダウンロード中…';
               }
             });
           },
@@ -573,10 +591,13 @@ async function askLlm(question) {
   const context = chatContext(question, contextLimit);
   const controller = new AbortController();
   let stopReason = '';
-  const timeout = setTimeout(() => {
-    stopReason = 'timeout';
-    controller.abort();
-  }, CHAT_TIMEOUT_MS);
+  let timeout = null;
+  const startResponseTimeout = () => {
+    timeout = setTimeout(() => {
+      stopReason = 'timeout';
+      controller.abort();
+    }, CHAT_TIMEOUT_MS);
+  };
   currentChatAbort = {
     abort(reason = 'manual') {
       stopReason = reason;
@@ -596,22 +617,21 @@ async function askLlm(question) {
     const prompt = context
       ? `[現在のページ]\n${askedDoc.title || ''}\n${askedDoc.url}\n\n[質問に関連する原文と訳文]\n${context}\n\n[質問]\n${question}`
       : question;
-    if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) {
-      chatStatusEl.textContent = context ? `回答中…（ページ文脈 ${context.length.toLocaleString()}文字）` : '回答中…（ページ文脈なし）';
-    }
     let answer = '';
     if (profile.provider === 'chrome') {
       const session = await createLlmSession(state, askedDomain, askedProfileId, controller.signal);
-      if (session.promptStreaming) {
-        for await (const chunk of session.promptStreaming(prompt, { signal: controller.signal })) {
-          answer += chunk;
-          answerEl.textContent = answer;
-          chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-        }
-      } else {
-        answer = await session.prompt(prompt, { signal: controller.signal });
+      if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) {
+        chatStatusEl.textContent = context ? `回答中…（ページ文脈 ${context.length.toLocaleString()}文字）` : '回答中…（ページ文脈なし）';
       }
+      startResponseTimeout();
+      // 一部のChrome環境で promptStreaming() が最初のチャンクを返さないことがあるため、
+      // 短い対話では安定して完了を検知できる prompt() を使う。
+      answer = await session.prompt(prompt, { signal: controller.signal });
     } else {
+      if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) {
+        chatStatusEl.textContent = context ? `回答中…（ページ文脈 ${context.length.toLocaleString()}文字）` : '回答中…（ページ文脈なし）';
+      }
+      startResponseTimeout();
       answer = await apiChat(
         [
           { role: 'system', content: chatSystemPrompt(askedDomain) },
@@ -1006,12 +1026,15 @@ function positionRetry(i) {
   if (!retryBtn) return;
   if (i == null || stateArr[i] !== 'done' || !els[i]) {
     retryBtn.style.display = 'none';
+    retryIdx = null;
     return;
   }
   const r = els[i].getBoundingClientRect();
-  // 訳文に重ねず、対象ブロックの直前（前ブロック側）へ出す。
+  retryIdx = i;
+  // 28pxのクリック領域の下端を対象ブロック上端へ接続し、前ブロックへ
+  // mouseover が抜ける隙間を作らない。見た目は訳文の外側に置く。
   retryBtn.style.top = `${Math.max(2, Math.min(r.top - 28, fwin.innerHeight - 28))}px`;
-  retryBtn.style.left = `${Math.max(2, Math.min(r.right - 26, fwin.innerWidth - 30))}px`;
+  retryBtn.style.left = `${Math.max(2, Math.min(r.right - 28, fwin.innerWidth - 30))}px`;
   retryBtn.style.display = 'block';
 }
 
@@ -1043,7 +1066,7 @@ function attachFrameListeners() {
     'click',
     (e) => {
       if (e.target === retryBtn) {
-        if (hoverIdx != null) retryBlock(hoverIdx);
+        if (retryIdx != null) retryBlock(retryIdx);
         return;
       }
       const el = e.target.closest?.('[data-st-i]');
