@@ -83,6 +83,9 @@
           <button id="chat-cfg-refresh-models" type="button" title="Ollamaのインストール済みモデル一覧を取得">🔄</button>
         </label>
         <datalist id="chat-cfg-model-list"></datalist>
+        <label>ページ文脈の最大文字数（0でなし）
+          <input id="chat-cfg-context-limit" type="number" min="0" max="50000" step="500" />
+        </label>
         <p class="hint" id="chat-cfg-hint"></p>
         <div class="settings-actions">
           <button id="chat-cfg-update" type="button">更新</button>
@@ -117,6 +120,7 @@
       <div id="chat-status" aria-live="polite"></div>
       <form id="chat-form">
         <textarea id="chat-input" rows="2" placeholder="このページの分からない箇所を質問…" required></textarea>
+        <button id="chat-stop" type="button" hidden>停止</button>
         <button id="chat-send" type="submit">送信</button>
       </form>
     </section>

@@ -382,6 +382,7 @@ body {
 }
 
 .chat-actions button,
+#chat-stop,
 #chat-send {
   color: var(--text);
   background: var(--pane);
@@ -456,6 +457,7 @@ body {
 }
 
 #chat-send:disabled,
+#chat-stop:disabled,
 #chat-input:disabled {
   opacity: 0.55;
   cursor: wait;

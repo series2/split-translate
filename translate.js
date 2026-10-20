@@ -321,6 +321,7 @@
     try {
       res = await fetch(`${opts.url}/api/chat`, {
         method: 'POST',
+        signal: opts.signal,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: opts.model,
@@ -348,6 +349,7 @@
     try {
       res = await fetch(`${opts.url}/chat/completions`, {
         method: 'POST',
+        signal: opts.signal,
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${opts.apiKey || ''}` },
         body: JSON.stringify({ model: opts.model, temperature: opts.temperature ?? 0.2, max_tokens: 2048, messages }),
       });
@@ -371,6 +373,7 @@
     try {
       res = await fetch(`${opts.url}/v1/messages`, {
         method: 'POST',
+        signal: opts.signal,
         headers: {
           'Content-Type': 'application/json',
           'x-api-key': opts.apiKey || '',

@@ -92,14 +92,16 @@ const CHAT_PROVIDER_DEFAULTS = {
 };
 const CONCURRENCY = 2;
 const MAX_CACHE_ENTRIES = 4000;
+const DEFAULT_CHAT_CONTEXT_CHARS = 4000;
+const CHAT_TIMEOUT_MS = 90000;
 
 // 複製の中に差し込むスタイル（ホバー・状態表示・再翻訳ボタン）
 const FRAME_CSS = `
 [data-st-hl]{background-color:rgba(250,204,21,.4)!important;outline:2px solid rgba(234,179,8,.9)!important;outline-offset:2px!important;border-radius:3px}
 [data-st-state=pending],[data-st-state=busy]{opacity:.55!important}
 [data-st-state=error]{outline:2px dashed #d93025!important;outline-offset:2px!important;cursor:pointer!important}
-#st-retry{all:initial;position:fixed;z-index:2147483647;display:none;width:24px;height:24px;font:15px/22px sans-serif;text-align:center;color:#555;background:#fff;border:1px solid #bbb;border-radius:6px;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.25)}
-#st-retry:hover{color:#2563eb;border-color:#2563eb}
+#st-retry{all:initial;position:fixed;z-index:2147483647;display:none;width:24px;height:24px;font:15px/22px sans-serif;text-align:center;color:#555;background:#fff;border:1px solid #bbb;border-radius:6px;cursor:pointer;opacity:.72;box-shadow:0 1px 3px rgba(0,0,0,.25)}
+#st-retry:hover{color:#2563eb;border-color:#2563eb;opacity:1}
 `;
 
 // ---------------------------------------------------------------------------
@@ -119,6 +121,7 @@ const chatStatusEl = $('#chat-status');
 const chatForm = $('#chat-form');
 const chatInput = $('#chat-input');
 const btnChatSend = $('#chat-send');
+const btnChatStop = $('#chat-stop');
 const btnChatReset = $('#chat-reset');
 const btnChatClose = $('#chat-close');
 const btnChatSettings = $('#chat-settings');
@@ -157,6 +160,7 @@ const selChatCfgProvider = $('#chat-cfg-provider');
 const inChatCfgUrl = $('#chat-cfg-url');
 const inChatCfgKey = $('#chat-cfg-key');
 const inChatCfgModel = $('#chat-cfg-model');
+const inChatCfgContextLimit = $('#chat-cfg-context-limit');
 const chatCfgModelList = $('#chat-cfg-model-list');
 const btnChatCfgRefresh = $('#chat-cfg-refresh-models');
 const rowChatCfgUrl = $('#chat-cfg-url-row');
@@ -191,6 +195,7 @@ const llmStates = new Map(); // domain + chat profile -> { history, session, cre
 let activeChatDomain = '';
 let activeChatProfileId = BUILTIN_CHAT_ID;
 let chatBusy = false;
+let currentChatAbort = null;
 
 // 複製（iframe）側
 let frameToken = 0;
@@ -373,7 +378,6 @@ function currentStore(force) {
 // Local LLM チャット（Chrome Prompt API / Gemini Nano）
 // ---------------------------------------------------------------------------
 const MAX_CHAT_MESSAGES = 16;
-const MAX_CHAT_CONTEXT = 12000;
 
 function domainOf(url) {
   try {
@@ -415,10 +419,18 @@ function renderChatHistory(history) {
 }
 
 async function switchChatDomain(d) {
-  activeChatDomain = d ? domainOf(d.url) : '';
+  const nextDomain = d ? domainOf(d.url) : '';
+  if (chatBusy && nextDomain !== activeChatDomain) currentChatAbort?.abort('switch');
+  activeChatDomain = nextDomain;
   chatDomainEl.textContent = activeChatDomain;
   chatStatusEl.textContent = '';
   chatStatusEl.classList.remove('error');
+  const keepId = activeChatDomain ? llmStateId(activeChatDomain, activeChatProfileId) : '';
+  for (const [id, state] of llmStates) {
+    if (id === keepId || !state.session) continue;
+    state.session.destroy?.();
+    state.session = null;
+  }
   if (!activeChatDomain) return renderChatHistory([]);
   const expectedDomain = activeChatDomain;
   const expectedProfile = activeChatProfileId;
@@ -441,20 +453,61 @@ function populateChatProfileSelect() {
   }
 }
 
-function chatContext() {
-  if (!doc) return '';
+const CHAT_STOP_WORDS = new Set([
+  'これ', 'それ', 'あれ', 'ここ', 'そこ', 'どこ', 'この', 'その', 'について', 'ください', '教えて', '説明', '意味',
+  'what', 'where', 'when', 'which', 'please', 'tell', 'explain', 'this', 'that', 'about', 'with', 'from',
+]);
+
+function chatQuestionTerms(question) {
+  let words = [];
+  try {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: 'word' });
+    words = [...segmenter.segment(question)].filter((part) => part.isWordLike).map((part) => part.segment);
+  } catch {
+    words = question.match(/[\p{L}\p{N}]{2,}/gu) || [];
+  }
+  return [...new Set(words.map((word) => word.toLocaleLowerCase()).filter((word) => word.length >= 2 && !CHAT_STOP_WORDS.has(word)))].slice(0, 12);
+}
+
+function questionNeedsPageContext(question, selected) {
+  if (selected) return true;
+  return !/^\s*(こんにちは|こんばんは|おはよう|ありがとう|hi|hello|thanks|thank you)[!！。.、,\s]*$/i.test(question);
+}
+
+function chatContext(question, maxChars) {
+  if (!doc || maxChars <= 0) return '';
   const selected = String(fwin?.getSelection?.() || '').trim();
-  const start = Math.max(0, anchor - 8);
-  const end = Math.min(doc.blocks.length, anchor + 9);
+  if (!questionNeedsPageContext(question, selected)) return '';
+
+  const terms = chatQuestionTerms(question);
+  const scores = [];
+  for (let i = 0; i < doc.blocks.length; i++) {
+    const source = sourceOf(doc.blocks[i]).split(C.SEP).join(' ').trim();
+    const translated = curStore[i]?.split(C.SEP).join(' ').trim() || '';
+    const haystack = `${source}\n${translated}`.toLocaleLowerCase();
+    let score = 0;
+    for (const term of terms) if (haystack.includes(term)) score += Math.min(4, term.length);
+    if (score) scores.push({ i, score });
+  }
+  scores.sort((a, b) => b.score - a.score || Math.abs(a.i - anchor) - Math.abs(b.i - anchor));
+
+  const indexes = new Set();
+  if (scores.length) {
+    for (const { i } of scores.slice(0, 6)) indexes.add(i);
+    for (let i = Math.max(0, anchor - 1); i <= Math.min(doc.blocks.length - 1, anchor + 1); i++) indexes.add(i);
+  } else {
+    for (let i = Math.max(0, anchor - 2); i <= Math.min(doc.blocks.length - 1, anchor + 2); i++) indexes.add(i);
+  }
+
   const parts = [];
   if (selected) parts.push(`[選択中の文章]\n${selected}`);
-  for (let i = start; i < end; i++) {
+  for (const i of [...indexes].sort((a, b) => a - b)) {
     const source = sourceOf(doc.blocks[i]).split(C.SEP).join(' ').trim();
     if (!source) continue;
     const translated = curStore[i]?.split(C.SEP).join(' ').trim();
     parts.push(`[ブロック ${i + 1} / 原文]\n${source}${translated ? `\n[訳文]\n${translated}` : ''}`);
   }
-  return parts.join('\n\n').slice(0, MAX_CHAT_CONTEXT);
+  return parts.join('\n\n').slice(0, maxChars);
 }
 
 function llmErrorMessage(err, provider) {
@@ -472,7 +525,7 @@ function chatSystemPrompt(domain) {
   );
 }
 
-async function createLlmSession(state, domain, profileId) {
+async function createLlmSession(state, domain, profileId, signal) {
   if (!globalThis.LanguageModel) throw new Error('LanguageModel API が利用できません');
   if (state.session) return state.session;
   if (!state.creating) {
@@ -488,6 +541,7 @@ async function createLlmSession(state, domain, profileId) {
           ...state.history.slice(-10).map((item) => ({ role: item.role, content: item.content })),
         ];
         state.session = await LanguageModel.create({
+          signal,
           initialPrompts,
           monitor(monitor) {
             monitor.addEventListener('downloadprogress', (event) => {
@@ -514,29 +568,48 @@ async function askLlm(question) {
   const profile = chatProfile();
   if (!profile) return;
   const askedDoc = doc;
-  const context = chatContext();
+  const configuredLimit = Number(profile.maxContextChars ?? DEFAULT_CHAT_CONTEXT_CHARS);
+  const contextLimit = Math.max(0, Math.min(50000, Number.isFinite(configuredLimit) ? configuredLimit : DEFAULT_CHAT_CONTEXT_CHARS));
+  const context = chatContext(question, contextLimit);
+  const controller = new AbortController();
+  let stopReason = '';
+  const timeout = setTimeout(() => {
+    stopReason = 'timeout';
+    controller.abort();
+  }, CHAT_TIMEOUT_MS);
+  currentChatAbort = {
+    abort(reason = 'manual') {
+      stopReason = reason;
+      controller.abort();
+    },
+  };
   chatBusy = true;
   chatInput.disabled = true;
   btnChatSend.disabled = true;
+  btnChatStop.hidden = false;
   chatStatusEl.classList.remove('error');
   chatStatusEl.textContent = '準備中…';
   appendChatMessage('user', question);
   const answerEl = appendChatMessage('assistant', '');
   try {
     const state = await llmState(askedDomain, askedProfileId);
-    const prompt = `[現在のページ]\n${askedDoc.title || ''}\n${askedDoc.url}\n\n[関連する原文と訳文]\n${context}\n\n[質問]\n${question}`;
-    if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) chatStatusEl.textContent = '回答中…';
+    const prompt = context
+      ? `[現在のページ]\n${askedDoc.title || ''}\n${askedDoc.url}\n\n[質問に関連する原文と訳文]\n${context}\n\n[質問]\n${question}`
+      : question;
+    if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) {
+      chatStatusEl.textContent = context ? `回答中…（ページ文脈 ${context.length.toLocaleString()}文字）` : '回答中…（ページ文脈なし）';
+    }
     let answer = '';
     if (profile.provider === 'chrome') {
-      const session = await createLlmSession(state, askedDomain, askedProfileId);
+      const session = await createLlmSession(state, askedDomain, askedProfileId, controller.signal);
       if (session.promptStreaming) {
-        for await (const chunk of session.promptStreaming(prompt)) {
+        for await (const chunk of session.promptStreaming(prompt, { signal: controller.signal })) {
           answer += chunk;
           answerEl.textContent = answer;
           chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
         }
       } else {
-        answer = await session.prompt(prompt);
+        answer = await session.prompt(prompt, { signal: controller.signal });
       }
     } else {
       answer = await apiChat(
@@ -550,6 +623,7 @@ async function askLlm(question) {
           url: (profile.url || '').replace(/\/+$/, ''),
           apiKey: profile.apiKey || '',
           model: profile.model || '',
+          signal: controller.signal,
         }
       );
     }
@@ -563,15 +637,23 @@ async function askLlm(question) {
     }
   } catch (err) {
     answerEl.remove();
+    const state = await llmState(askedDomain, askedProfileId);
+    if (profile.provider === 'chrome' && (stopReason || err?.name === 'AbortError')) {
+      state.session?.destroy?.();
+      state.session = null;
+    }
     if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) {
-      chatStatusEl.textContent = llmErrorMessage(err, profile.provider);
-      chatStatusEl.classList.add('error');
+      chatStatusEl.textContent = stopReason === 'timeout' ? '90秒応答がなかったため停止しました' : stopReason ? '回答を停止しました' : llmErrorMessage(err, profile.provider);
+      chatStatusEl.classList.toggle('error', !stopReason);
     }
     console.warn('LLM chat failed', err);
   } finally {
+    clearTimeout(timeout);
+    currentChatAbort = null;
     chatBusy = false;
     chatInput.disabled = false;
     btnChatSend.disabled = false;
+    btnChatStop.hidden = true;
     if (activeChatDomain === askedDomain && activeChatProfileId === askedProfileId) chatInput.focus();
   }
 }
@@ -927,7 +1009,8 @@ function positionRetry(i) {
     return;
   }
   const r = els[i].getBoundingClientRect();
-  retryBtn.style.top = `${Math.max(2, Math.min(r.top, fwin.innerHeight - 28))}px`;
+  // 訳文に重ねず、対象ブロックの直前（前ブロック側）へ出す。
+  retryBtn.style.top = `${Math.max(2, Math.min(r.top - 28, fwin.innerHeight - 28))}px`;
   retryBtn.style.left = `${Math.max(2, Math.min(r.right - 26, fwin.innerWidth - 30))}px`;
   retryBtn.style.display = 'block';
 }
@@ -1334,7 +1417,15 @@ function uniqueChatProfileName(base) {
 
 function makeChatProfile(provider = 'ollama', id = crypto.randomUUID()) {
   const d = chatDefaultsFor(provider);
-  return { id, name: uniqueChatProfileName(d.label), provider, url: d.url, apiKey: '', model: d.model };
+  return {
+    id,
+    name: uniqueChatProfileName(d.label),
+    provider,
+    url: d.url,
+    apiKey: '',
+    model: d.model,
+    maxContextChars: DEFAULT_CHAT_CONTEXT_CHARS,
+  };
 }
 
 function saveChatProfiles() {
@@ -1344,13 +1435,12 @@ function saveChatProfiles() {
 function updateChatProviderVisibility() {
   const provider = selChatCfgProvider.value;
   const d = chatDefaultsFor(provider);
-  const builtin = selChatCfgProfile.value === BUILTIN_CHAT_ID;
-  selChatCfgProvider.disabled = builtin;
+  selChatCfgProvider.disabled = false;
   rowChatCfgUrl.hidden = provider === 'chrome';
   rowChatCfgKey.hidden = !d.needsKey;
   rowChatCfgModel.hidden = provider === 'chrome';
   btnChatCfgRefresh.hidden = provider !== 'ollama';
-  btnChatCfgDelete.disabled = builtin || chatProfiles.length <= 1;
+  btnChatCfgDelete.disabled = chatProfiles.length <= 1;
   chatCfgHint.textContent =
     provider === 'chrome'
       ? 'Chromeが管理する内蔵モデルを端末内で使います。モデル名は変更できません。'
@@ -1369,6 +1459,7 @@ function fillChatEditor(profile) {
   inChatCfgUrl.value = profile.url || '';
   inChatCfgKey.value = profile.apiKey || '';
   inChatCfgModel.value = profile.model || '';
+  inChatCfgContextLimit.value = profile.maxContextChars ?? DEFAULT_CHAT_CONTEXT_CHARS;
   updateChatProviderVisibility();
 }
 
@@ -1418,23 +1509,21 @@ btnChatCfgRefresh.addEventListener('click', async () => {
 });
 
 btnChatCfgUpdate.addEventListener('click', async () => {
+  if (chatBusy) return;
   const profile = chatProfile();
   if (!profile) return;
-  if (profile.id !== BUILTIN_CHAT_ID) {
-    const provider = selChatCfgProvider.value;
-    const defaults = chatDefaultsFor(provider);
-    const url = inChatCfgUrl.value.trim().replace(/\/+$/, '') || defaults.url;
-    if (!(await ensureHostPermission(url, provider))) return;
-    Object.assign(profile, {
-      name: inChatCfgName.value.trim() || defaults.label,
-      provider,
-      url,
-      apiKey: inChatCfgKey.value,
-      model: inChatCfgModel.value.trim() || defaults.model,
-    });
-  } else {
-    profile.name = inChatCfgName.value.trim() || CHAT_PROVIDER_DEFAULTS.chrome.label;
-  }
+  const provider = selChatCfgProvider.value;
+  const defaults = chatDefaultsFor(provider);
+  const url = inChatCfgUrl.value.trim().replace(/\/+$/, '') || defaults.url;
+  if (!(await ensureHostPermission(url, provider))) return;
+  Object.assign(profile, {
+    name: inChatCfgName.value.trim() || defaults.label,
+    provider,
+    url,
+    apiKey: inChatCfgKey.value,
+    model: inChatCfgModel.value.trim() || defaults.model,
+    maxContextChars: Math.max(0, Math.min(50000, Number(inChatCfgContextLimit.value) || 0)),
+  });
   refreshChatProfileControls();
   await saveChatProfiles();
   btnChatCfgUpdate.textContent = '更新しました ✓';
@@ -1442,6 +1531,7 @@ btnChatCfgUpdate.addEventListener('click', async () => {
 });
 
 btnChatCfgAdd.addEventListener('click', async () => {
+  if (chatBusy) return;
   const profile = makeChatProfile('ollama');
   chatProfiles.push(profile);
   activeChatProfileId = profile.id;
@@ -1454,7 +1544,8 @@ btnChatCfgAdd.addEventListener('click', async () => {
 });
 
 btnChatCfgDelete.addEventListener('click', async () => {
-  if (activeChatProfileId === BUILTIN_CHAT_ID || chatProfiles.length <= 1) return;
+  if (chatBusy) return;
+  if (chatProfiles.length <= 1) return;
   const removedId = activeChatProfileId;
   chatProfiles = chatProfiles.filter((p) => p.id !== removedId);
   activeChatProfileId = chatProfiles[0].id;
@@ -1618,7 +1709,11 @@ chatInput.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) chatForm.requestSubmit();
 });
 btnChatReset.addEventListener('click', resetLlmChat);
-btnChatClose.addEventListener('click', () => setChatOpen(false));
+btnChatClose.addEventListener('click', () => {
+  currentChatAbort?.abort('close');
+  setChatOpen(false);
+});
+btnChatStop.addEventListener('click', () => currentChatAbort?.abort('manual'));
 btnChatSettings.addEventListener('click', () => {
   const profile = chatProfile();
   setToolbarOpen(true);
@@ -1649,6 +1744,11 @@ selSl.addEventListener('change', () => (savePrefs(), translateAll(true)));
 selTl.addEventListener('change', () => (savePrefs(), translateAll()));
 chkSync.addEventListener('change', savePrefs);
 $('#retry').addEventListener('click', () => translateAll(true));
+
+addEventListener('pagehide', () => {
+  currentChatAbort?.abort('unload');
+  for (const state of llmStates.values()) state.session?.destroy?.();
+});
 
 (async function init() {
   selSl.append(new Option('自動検出', 'auto'));
@@ -1705,9 +1805,6 @@ $('#retry').addEventListener('click', () => translateAll(true));
   populateProfileSelect();
   if (Array.isArray(stored.chatProfiles) && stored.chatProfiles.length) {
     chatProfiles = stored.chatProfiles;
-    if (!chatProfiles.some((p) => p.id === BUILTIN_CHAT_ID)) {
-      chatProfiles.unshift(makeChatProfile('chrome', BUILTIN_CHAT_ID));
-    }
   } else {
     chatProfiles = [makeChatProfile('chrome', BUILTIN_CHAT_ID)];
   }
