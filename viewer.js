@@ -94,6 +94,8 @@ const CONCURRENCY = 2;
 const MAX_CACHE_ENTRIES = 4000;
 const DEFAULT_CHAT_CONTEXT_CHARS = 4000;
 const CHAT_TIMEOUT_MS = 90000;
+const MIN_CHAT_HEIGHT = 120;
+const CHAT_CLOSE_THRESHOLD = 80;
 const LOCAL_LLM_OPTIONS = {
   // Chrome Prompt API が現在サポートするテキスト言語。システム指示と通常の質問は日本語、
   // ページ本文には英語などが混ざるため、availability() と create() の両方へ同じ宣言を渡す。
@@ -131,6 +133,8 @@ const btnChatStop = $('#chat-stop');
 const btnChatReset = $('#chat-reset');
 const btnChatClose = $('#chat-close');
 const btnChatSettings = $('#chat-settings');
+const btnChatInfoToggle = $('#chat-info-toggle');
+const chatInfo = $('#chat-info');
 const chatResizer = $('#chat-resizer');
 const selChatProfile = $('#chat-profile');
 const selSl = $('#sl');
@@ -414,10 +418,165 @@ async function llmState(domain, profileId = activeChatProfileId) {
 function appendChatMessage(role, text) {
   const el = document.createElement('div');
   el.className = `chat-message ${role}`;
-  el.textContent = text;
+  if (role === 'assistant') renderMarkdown(el, text);
+  else el.textContent = text;
   chatMessagesEl.append(el);
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
   return el;
+}
+
+// LLMの出力を表示するための小さなMarkdownレンダラー。
+// innerHTMLは使わず、リンク先も安全なプロトコルだけを許可する。
+function appendInlineMarkdown(parent, source) {
+  const pattern = /(`+)([^\n]*?)\1|\[([^\]]+)\]\(([^\s)]+)(?:\s+["'][^"']*["'])?\)|(\*\*|__)(.+?)\5|(?<!\*)\*([^*\n]+)\*(?!\*)|(?<!_)_([^_\n]+)_(?!_)/g;
+  let offset = 0;
+  let match;
+
+  const appendText = (text) => {
+    const lines = text.split('\n');
+    lines.forEach((line, index) => {
+      if (index) parent.append(document.createElement('br'));
+      if (line) parent.append(document.createTextNode(line));
+    });
+  };
+
+  while ((match = pattern.exec(source))) {
+    appendText(source.slice(offset, match.index));
+    if (match[1]) {
+      const code = document.createElement('code');
+      code.textContent = match[2];
+      parent.append(code);
+    } else if (match[3]) {
+      let url;
+      try {
+        url = new URL(match[4]);
+      } catch {
+        url = null;
+      }
+      if (url && ['http:', 'https:', 'mailto:'].includes(url.protocol)) {
+        const link = document.createElement('a');
+        link.href = url.href;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        appendInlineMarkdown(link, match[3]);
+        parent.append(link);
+      } else {
+        appendText(match[0]);
+      }
+    } else {
+      const emphasis = document.createElement(match[5] ? 'strong' : 'em');
+      appendInlineMarkdown(emphasis, match[5] ? match[6] : (match[7] || match[8]));
+      parent.append(emphasis);
+    }
+    offset = pattern.lastIndex;
+  }
+  appendText(source.slice(offset));
+}
+
+function markdownCells(line) {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  return trimmed.split(/(?<!\\)\|/).map((cell) => cell.trim().replace(/\\\|/g, '|'));
+}
+
+function renderMarkdown(container, markdown) {
+  container.replaceChildren();
+  const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
+
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+
+    const fence = line.match(/^\s*```\s*([^\s`]*)\s*$/);
+    if (fence) {
+      const codeLines = [];
+      i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) codeLines.push(lines[i++]);
+      if (i < lines.length) i++;
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      if (fence[1]) code.dataset.language = fence[1];
+      code.textContent = codeLines.join('\n');
+      pre.append(code);
+      container.append(pre);
+      continue;
+    }
+
+    const heading = line.match(/^\s*(#{1,6})\s+(.+)$/);
+    if (heading) {
+      const el = document.createElement(`h${heading[1].length}`);
+      appendInlineMarkdown(el, heading[2]);
+      container.append(el);
+      i++;
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quote = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) quote.push(lines[i++].replace(/^\s*>\s?/, ''));
+      const el = document.createElement('blockquote');
+      appendInlineMarkdown(el, quote.join('\n'));
+      container.append(el);
+      continue;
+    }
+
+    const listMatch = line.match(/^\s*(?:([-+*])|(\d+)[.)])\s+(.+)$/);
+    if (listMatch) {
+      const ordered = Boolean(listMatch[2]);
+      const list = document.createElement(ordered ? 'ol' : 'ul');
+      if (ordered && Number(listMatch[2]) !== 1) list.start = Number(listMatch[2]);
+      while (i < lines.length) {
+        const item = lines[i].match(/^\s*(?:([-+*])|(\d+)[.)])\s+(.+)$/);
+        if (!item || Boolean(item[2]) !== ordered) break;
+        const li = document.createElement('li');
+        appendInlineMarkdown(li, item[3]);
+        list.append(li);
+        i++;
+      }
+      container.append(list);
+      continue;
+    }
+
+    if (line.includes('|') && i + 1 < lines.length && /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[i + 1])) {
+      const table = document.createElement('table');
+      const thead = table.createTHead();
+      const headerRow = thead.insertRow();
+      for (const cell of markdownCells(line)) {
+        const th = document.createElement('th');
+        appendInlineMarkdown(th, cell);
+        headerRow.append(th);
+      }
+      const tbody = table.createTBody();
+      i += 2;
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim()) {
+        const row = tbody.insertRow();
+        for (const cell of markdownCells(lines[i++])) {
+          const td = row.insertCell();
+          appendInlineMarkdown(td, cell);
+        }
+      }
+      container.append(table);
+      continue;
+    }
+
+    if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      container.append(document.createElement('hr'));
+      i++;
+      continue;
+    }
+
+    const paragraph = [line];
+    i++;
+    while (i < lines.length && lines[i].trim() && !/^\s*(?:```|#{1,6}\s|>|[-+*]\s+|\d+[.)]\s+)/.test(lines[i])) {
+      if (lines[i].includes('|') && i + 1 < lines.length && /-{3,}/.test(lines[i + 1])) break;
+      paragraph.push(lines[i++]);
+    }
+    const p = document.createElement('p');
+    appendInlineMarkdown(p, paragraph.join('\n'));
+    container.append(p);
+  }
 }
 
 function renderChatHistory(history) {
@@ -543,9 +702,9 @@ async function createLlmSession(state, domain, profileId, signal) {
         if (activeChatDomain === domain && activeChatProfileId === profileId) {
           chatStatusEl.textContent =
             availability === 'downloadable'
-              ? 'Local LLM モデルのダウンロードを開始しています…（初回は数分かかることがあります）'
+              ? 'Local LLM モデルのダウンロードを開始しています…（容量・対処方法はⓘ）'
               : availability === 'downloading'
-              ? 'Local LLM モデルをダウンロード中…（初回は数分かかることがあります）'
+              ? 'Local LLM モデルをダウンロード中…（容量・対処方法はⓘ）'
               : 'Local LLM モデルを読み込み中…';
         }
         const initialPrompts = [
@@ -647,8 +806,8 @@ async function askLlm(question) {
         }
       );
     }
-    answerEl.textContent = answer;
-    if (!answer.trim()) answer = answerEl.textContent = '回答を生成できませんでした。';
+    if (!answer.trim()) answer = '回答を生成できませんでした。';
+    renderMarkdown(answerEl, answer);
     state.history.push({ role: 'user', content: question }, { role: 'assistant', content: answer });
     state.history = state.history.slice(-MAX_CHAT_MESSAGES);
     await chrome.storage.session.set({ [llmHistoryKey(askedDomain, askedProfileId)]: state.history });
@@ -1588,16 +1747,20 @@ function setToolbarOpen(open, save = true) {
   btnToolbarToggle.textContent = open ? '閉じる' : '設定';
   btnToolbarToggle.title = open ? 'ヘッダーを隠す' : '翻訳設定を表示';
   clampFloatingControl(btnToolbarToggle);
-  if (!chatPane.hidden && chatPane.style.flexBasis) setChatHeight(chatPane.getBoundingClientRect().height, false);
+  if (isChatOpen() && chatPane.style.flexBasis) setChatHeight(chatPane.getBoundingClientRect().height, false);
   if (save) chrome.storage.local.set({ toolbarOpen: open });
 }
 
+const isChatOpen = () => !chatPane.hidden && !chatPane.classList.contains('collapsed');
+
 function setChatOpen(open, save = true) {
-  chatPane.hidden = !open;
+  chatPane.hidden = false;
+  chatPane.classList.toggle('collapsed', !open);
   btnChatToggle.hidden = open; // 開いている間は入力欄に重ねず、ヘッダーの × で閉じる
   btnChatToggle.setAttribute('aria-expanded', String(open));
   btnChatToggle.textContent = 'AI';
   btnChatToggle.title = 'LLMチャットを開く';
+  chatResizer.setAttribute('aria-label', open ? 'チャットの高さを変更' : '上へドラッグしてチャットを開く');
   clampFloatingControl(btnChatToggle);
   if (open) {
     if (!doc) {
@@ -1612,10 +1775,18 @@ function setChatOpen(open, save = true) {
 
 function setChatHeight(height, save = true) {
   const toolbarHeight = toolbar.hidden ? 0 : toolbar.getBoundingClientRect().height;
-  const max = Math.max(120, innerHeight - toolbarHeight - 80);
-  const value = Math.max(120, Math.min(Number(height) || 0, max));
+  const max = Math.max(MIN_CHAT_HEIGHT, innerHeight - toolbarHeight - 80);
+  const value = Math.max(MIN_CHAT_HEIGHT, Math.min(Number(height) || 0, max));
   chatPane.style.flexBasis = `${value}px`;
   if (save) chrome.storage.local.set({ chatHeight: value });
+}
+
+function closeChatFromResize() {
+  // 極小の高さを記憶しない。次に開いたときはCSSの既定サイズを使う。
+  chatPane.style.flexBasis = '';
+  chatPane.classList.remove('close-ready');
+  chrome.storage.local.remove('chatHeight');
+  setChatOpen(false);
 }
 
 function makeChatResizable(initialHeight) {
@@ -1623,30 +1794,76 @@ function makeChatResizable(initialHeight) {
   let drag = null;
   chatResizer.addEventListener('pointerdown', (event) => {
     if (event.button !== 0) return;
-    drag = { pointerId: event.pointerId, y: event.clientY, height: chatPane.getBoundingClientRect().height };
+    const collapsed = !isChatOpen();
+    const height = chatPane.getBoundingClientRect().height;
+    drag = {
+      pointerId: event.pointerId,
+      y: event.clientY,
+      height,
+      requestedHeight: collapsed ? 0 : height,
+      collapsed,
+      previousFlexBasis: chatPane.style.flexBasis,
+    };
     chatResizer.setPointerCapture(event.pointerId);
     document.body.style.cursor = 'ns-resize';
     event.preventDefault();
   });
   chatResizer.addEventListener('pointermove', (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
-    setChatHeight(drag.height + drag.y - event.clientY, false);
+    drag.requestedHeight = (drag.collapsed ? 0 : drag.height) + drag.y - event.clientY;
+    if (drag.collapsed) {
+      const opening = drag.requestedHeight >= CHAT_CLOSE_THRESHOLD;
+      chatPane.classList.toggle('collapsed', !opening);
+      if (opening) setChatHeight(drag.requestedHeight, false);
+    } else {
+      chatPane.classList.toggle('close-ready', drag.requestedHeight <= CHAT_CLOSE_THRESHOLD);
+      setChatHeight(drag.requestedHeight, false);
+    }
   });
   const finish = (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
+    const completedDrag = drag;
     drag = null;
     document.body.style.cursor = '';
-    setChatHeight(chatPane.getBoundingClientRect().height);
+    chatPane.classList.remove('close-ready');
+    if (completedDrag.collapsed) {
+      if (completedDrag.requestedHeight >= CHAT_CLOSE_THRESHOLD) {
+        setChatOpen(true);
+        setChatHeight(Math.max(MIN_CHAT_HEIGHT, completedDrag.requestedHeight));
+      } else {
+        chatPane.classList.add('collapsed');
+        chatPane.style.flexBasis = completedDrag.previousFlexBasis;
+      }
+    } else if (completedDrag.requestedHeight <= CHAT_CLOSE_THRESHOLD) {
+      closeChatFromResize();
+    } else {
+      setChatHeight(chatPane.getBoundingClientRect().height);
+    }
   };
   chatResizer.addEventListener('pointerup', finish);
   chatResizer.addEventListener('pointercancel', (event) => {
     if (!drag || event.pointerId !== drag.pointerId) return;
+    const cancelledDrag = drag;
     drag = null;
     document.body.style.cursor = '';
+    chatPane.classList.remove('close-ready');
+    if (cancelledDrag.collapsed) {
+      chatPane.classList.add('collapsed');
+      chatPane.style.flexBasis = cancelledDrag.previousFlexBasis;
+    }
   });
   chatResizer.addEventListener('keydown', (event) => {
     if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
     event.preventDefault();
+    if (!isChatOpen() && event.key === 'ArrowUp') {
+      setChatOpen(true);
+      return;
+    }
+    if (!isChatOpen()) return;
+    if (event.key === 'ArrowDown' && chatPane.getBoundingClientRect().height <= MIN_CHAT_HEIGHT) {
+      closeChatFromResize();
+      return;
+    }
     const delta = event.key === 'ArrowUp' ? 20 : -20;
     setChatHeight(chatPane.getBoundingClientRect().height + delta);
   });
@@ -1737,6 +1954,23 @@ btnChatClose.addEventListener('click', () => {
   setChatOpen(false);
 });
 btnChatStop.addEventListener('click', () => currentChatAbort?.abort('manual'));
+btnChatInfoToggle.addEventListener('click', () => {
+  chatInfo.hidden = !chatInfo.hidden;
+  btnChatInfoToggle.setAttribute('aria-expanded', String(!chatInfo.hidden));
+});
+chatInfo.addEventListener('click', async (event) => {
+  const button = event.target.closest?.('[data-chrome-page]');
+  if (!button) return;
+  const url = button.dataset.chromePage;
+  try {
+    await chrome.tabs.create({ url });
+  } catch (err) {
+    await navigator.clipboard.writeText(url).catch(() => {});
+    chatStatusEl.textContent = `${url} を開けなかったため、アドレスをコピーしました。`;
+    chatStatusEl.classList.add('error');
+    console.warn('failed to open Chrome diagnostics page', err);
+  }
+});
 btnChatSettings.addEventListener('click', () => {
   const profile = chatProfile();
   setToolbarOpen(true);
@@ -1805,7 +2039,7 @@ addEventListener('pagehide', () => {
   makeFloatingControlDraggable(
     btnChatToggle,
     'chatButtonPosition',
-    () => setChatOpen(chatPane.hidden),
+    () => setChatOpen(!isChatOpen()),
     stored.chatButtonPosition
   );
   setToolbarOpen(stored.toolbarOpen, false);

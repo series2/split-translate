@@ -111,11 +111,28 @@
           <span id="chat-domain"></span>
         </div>
         <div class="chat-actions">
+          <button id="chat-info-toggle" type="button" aria-controls="chat-info" aria-expanded="false" title="Local LLMとコンテキストについて">ⓘ</button>
           <button id="chat-settings" type="button">モデル設定</button>
           <button id="chat-reset" type="button">会話をリセット</button>
           <button id="chat-close" type="button" aria-label="チャットを閉じる">×</button>
         </div>
       </header>
+      <aside id="chat-info" class="chat-info" hidden>
+        <section>
+          <strong>Chrome内蔵 Local LLM</strong>
+          <p>初回はモデルをダウンロードします。Chromeプロファイルのあるドライブに22GB以上の空き容量が必要です。空き容量が10GB未満になるとモデルが削除される場合があります。</p>
+          <p>GPU実行は4GB超のVRAM、CPU実行は16GB以上のRAMと4コア以上が目安です。モデル取得中はChromeを閉じず、従量制ではないネットワークを利用してください。</p>
+          <div class="chat-info-links">
+            <button type="button" data-chrome-page="chrome://on-device-internals/">モデル状態・ログ</button>
+            <button type="button" data-chrome-page="chrome://components/">コンポーネント更新</button>
+          </div>
+        </section>
+        <section>
+          <strong>ページ文脈の選び方</strong>
+          <p>選択中の文章を最優先し、次に質問の語句と一致する原文・訳文を選びます。一致がない場合は現在表示中の前後を使い、単純な挨拶ではページ文脈を付けません。</p>
+          <p>「モデル設定」の最大文字数が上限です。0にすると文脈を送りません。外部APIを選ぶと、選ばれた文脈・質問・会話履歴が設定先へ送信されます。</p>
+        </section>
+      </aside>
       <div id="chat-messages" role="log" aria-live="polite"></div>
       <div id="chat-status" aria-live="polite"></div>
       <form id="chat-form">

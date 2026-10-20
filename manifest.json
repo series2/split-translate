@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Split Translate",
-  "version": "3.7.2",
+  "version": "3.8.0",
   "minimum_chrome_version": "116",
   "description": "ページを原文・訳文で並べ、ホバーとスクロールを連動します。Chrome内蔵のローカル翻訳とLocal LLMチャット、各種翻訳APIに対応します。",
   "permissions": [
