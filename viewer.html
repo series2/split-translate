@@ -7,8 +7,8 @@
     <link rel="stylesheet" href="viewer.css" />
   </head>
   <body>
-    <button id="toolbar-toggle" class="floating-control" type="button" aria-controls="toolbar" aria-expanded="false">設定</button>
-    <button id="chat-toggle" class="floating-control" type="button" aria-controls="chat-pane" aria-expanded="false">AI</button>
+    <button id="toolbar-toggle" class="floating-control" type="button" aria-controls="toolbar" aria-expanded="false" title="翻訳設定を表示">設定</button>
+    <button id="chat-toggle" class="floating-control" type="button" aria-controls="chat-pane" aria-expanded="false" title="LLMチャットを開く">AI</button>
     <header class="bar" id="toolbar" hidden>
       <div class="row">
         <a id="page-title" target="_blank" rel="noopener"></a>
@@ -24,8 +24,8 @@
           <select id="profile"></select>
         </label>
         <label class="check"><input type="checkbox" id="sync" checked />スクロール同期</label>
-        <button id="pause" type="button">一時停止</button>
-        <button id="retry" type="button">再翻訳</button>
+        <button id="pause" type="button" title="翻訳処理を一時停止">一時停止</button>
+        <button id="retry" type="button" title="ページ全体を再翻訳">再翻訳</button>
       </div>
       <div class="row">
         <span id="status" class="status" aria-live="polite"></span>
@@ -49,7 +49,7 @@
         <label id="cfg-region-row">リージョン <input id="cfg-region" type="text" spellcheck="false" placeholder="例: japaneast（不明なら global）" /></label>
         <label id="cfg-model-row">モデル
           <input id="cfg-model" type="text" spellcheck="false" list="cfg-model-list" />
-          <button id="cfg-refresh-models" type="button" title="Ollamaのインストール済みモデル一覧を取得">🔄</button>
+          <button id="cfg-refresh-models" type="button" aria-label="Ollamaのモデル一覧を更新" title="Ollamaのインストール済みモデル一覧を取得">↻</button>
         </label>
         <datalist id="cfg-model-list"></datalist>
         <label class="col" id="cfg-template-row">翻訳指示（テンプレート）
@@ -80,7 +80,7 @@
         <label id="chat-cfg-key-row">APIキー <input id="chat-cfg-key" type="password" spellcheck="false" autocomplete="off" /></label>
         <label id="chat-cfg-model-row">モデル
           <input id="chat-cfg-model" type="text" spellcheck="false" list="chat-cfg-model-list" />
-          <button id="chat-cfg-refresh-models" type="button" title="Ollamaのインストール済みモデル一覧を取得">🔄</button>
+          <button id="chat-cfg-refresh-models" type="button" aria-label="Ollamaのモデル一覧を更新" title="Ollamaのインストール済みモデル一覧を取得">↻</button>
         </label>
         <datalist id="chat-cfg-model-list"></datalist>
         <label>ページ文脈の最大文字数（0でなし）
@@ -103,7 +103,7 @@
       sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
 
     <section id="chat-pane" aria-label="LLMチャット" hidden>
-      <div id="chat-resizer" role="separator" aria-orientation="horizontal" aria-label="チャットの高さを変更" tabindex="0"></div>
+      <div id="chat-resizer" role="separator" aria-orientation="horizontal" aria-label="チャットの高さを変更" aria-valuemin="120" aria-valuenow="120" tabindex="0" title="ドラッグまたは矢印キーで高さを変更"></div>
       <header class="chat-header">
         <div class="chat-heading">
           <strong>LLMチャット</strong>
@@ -111,13 +111,13 @@
           <span id="chat-domain"></span>
         </div>
         <div class="chat-actions">
-          <button id="chat-info-toggle" type="button" aria-controls="chat-info" aria-expanded="false" title="Local LLMとコンテキストについて">ⓘ</button>
-          <button id="chat-settings" type="button">モデル設定</button>
-          <button id="chat-reset" type="button">会話をリセット</button>
-          <button id="chat-close" type="button" aria-label="チャットを閉じる">×</button>
+          <button id="chat-info-toggle" type="button" aria-controls="chat-info" aria-expanded="false" aria-label="Local LLMとコンテキストの情報" title="Local LLMとコンテキストの情報">ⓘ</button>
+          <button id="chat-settings" type="button" aria-controls="chat-model-settings" title="LLMチャットモデル設定を開く">モデル設定</button>
+          <button id="chat-reset" type="button" title="このドメインの会話履歴を消去">会話をリセット</button>
+          <button id="chat-close" type="button" aria-label="チャットを閉じる" title="チャットを閉じる（Esc）">×</button>
         </div>
       </header>
-      <aside id="chat-info" class="chat-info" hidden>
+      <aside id="chat-info" class="chat-info" role="region" aria-label="Local LLMとページ文脈の情報" hidden>
         <section>
           <strong>Chrome内蔵 Local LLM</strong>
           <p>初回はモデルをダウンロードします。Chromeプロファイルのあるドライブに22GB以上の空き容量が必要です。空き容量が10GB未満になるとモデルが削除される場合があります。</p>
@@ -133,12 +133,12 @@
           <p>「モデル設定」の最大文字数が上限です。0にすると文脈を送りません。外部APIを選ぶと、選ばれた文脈・質問・会話履歴が設定先へ送信されます。</p>
         </section>
       </aside>
-      <div id="chat-messages" role="log" aria-live="polite"></div>
-      <div id="chat-status" aria-live="polite"></div>
+      <div id="chat-messages" role="log" aria-live="polite" aria-relevant="additions text"></div>
+      <div id="chat-status" role="status" aria-live="polite"></div>
       <form id="chat-form">
-        <textarea id="chat-input" rows="2" placeholder="このページの分からない箇所を質問…" required></textarea>
-        <button id="chat-stop" type="button" hidden>停止</button>
-        <button id="chat-send" type="submit">送信</button>
+        <textarea id="chat-input" rows="2" aria-label="LLMへの質問" placeholder="質問を入力…（Ctrl/⌘+Enterで送信）" required></textarea>
+        <button id="chat-stop" type="button" title="回答生成を停止" hidden>停止</button>
+        <button id="chat-send" type="submit" title="質問を送信（Ctrl/⌘+Enter）">送信</button>
       </form>
     </section>
 

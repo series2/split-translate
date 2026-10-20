@@ -163,6 +163,7 @@ const cfgHint = $('#cfg-hint');
 const btnUpdate = $('#cfg-update');
 const btnAdd = $('#cfg-add');
 const btnDelete = $('#cfg-delete');
+const translateSettings = $('#translate-settings');
 const chatSettings = $('#chat-model-settings');
 const selChatCfgProfile = $('#chat-cfg-profile');
 const inChatCfgName = $('#chat-cfg-name');
@@ -840,6 +841,7 @@ async function askLlm(question) {
 async function resetLlmChat() {
   if (!activeChatDomain || chatBusy) return;
   const state = await llmState(activeChatDomain, activeChatProfileId);
+  if (state.history.length && !confirm(`「${activeChatDomain}」の会話履歴を消去しますか？`)) return;
   state.session?.destroy?.();
   state.session = null;
   state.creating = null;
@@ -1201,6 +1203,10 @@ let driver = false; // ユーザーがこのパネルを操作しているとき
 let rafPending = false;
 
 function attachFrameListeners() {
+  // iframe内の操作も、親パネルの一時UIに対する「外側クリック」とEscapeとして扱う。
+  fdoc.addEventListener('pointerdown', () => setChatInfoOpen(false), { passive: true });
+  fdoc.addEventListener('keydown', handleEscape, true);
+
   // ホバー → ページのブロックをハイライト
   fdoc.addEventListener('mouseover', (e) => {
     if (e.target === retryBtn) return;
@@ -1574,6 +1580,8 @@ btnDelete.addEventListener('click', async () => {
     setNotice('最後の1つのモデル設定は削除できません。');
     return;
   }
+  const profile = activeProfile();
+  if (!confirm(`翻訳モデル設定「${profile?.name || '(無題)'}」を削除しますか？`)) return;
   profiles = profiles.filter((p) => p.id !== activeProfileId);
   activeProfileId = profiles[0].id;
   populateProfileSelect();
@@ -1728,6 +1736,8 @@ btnChatCfgAdd.addEventListener('click', async () => {
 btnChatCfgDelete.addEventListener('click', async () => {
   if (chatBusy) return;
   if (chatProfiles.length <= 1) return;
+  const profile = chatProfile();
+  if (!confirm(`LLMチャットモデル設定「${profile?.name || '(無題)'}」を削除しますか？`)) return;
   const removedId = activeChatProfileId;
   chatProfiles = chatProfiles.filter((p) => p.id !== removedId);
   activeChatProfileId = chatProfiles[0].id;
@@ -1743,6 +1753,10 @@ const savePrefs = () => chrome.storage.local.set({ source: selSl.value, target: 
 
 function setToolbarOpen(open, save = true) {
   toolbar.hidden = !open;
+  if (!open) {
+    translateSettings.open = false;
+    chatSettings.open = false;
+  }
   btnToolbarToggle.setAttribute('aria-expanded', String(open));
   btnToolbarToggle.textContent = open ? '閉じる' : '設定';
   btnToolbarToggle.title = open ? 'ヘッダーを隠す' : '翻訳設定を表示';
@@ -1753,14 +1767,31 @@ function setToolbarOpen(open, save = true) {
 
 const isChatOpen = () => !chatPane.hidden && !chatPane.classList.contains('collapsed');
 
+function setChatInfoOpen(open, returnFocus = false) {
+  chatInfo.hidden = !open;
+  btnChatInfoToggle.setAttribute('aria-expanded', String(open));
+  if (!open && returnFocus && isChatOpen()) btnChatInfoToggle.focus();
+}
+
+function updateChatResizerAria(open, height = 0) {
+  const toolbarHeight = toolbar.hidden ? 0 : toolbar.getBoundingClientRect().height;
+  const max = Math.max(MIN_CHAT_HEIGHT, innerHeight - toolbarHeight - 80);
+  chatResizer.setAttribute('aria-valuemin', String(open ? MIN_CHAT_HEIGHT : 0));
+  chatResizer.setAttribute('aria-valuemax', String(max));
+  chatResizer.setAttribute('aria-valuenow', String(open ? Math.round(height || chatPane.getBoundingClientRect().height) : 0));
+  chatResizer.setAttribute('aria-valuetext', open ? `チャットの高さ ${Math.round(height || chatPane.getBoundingClientRect().height)}ピクセル` : 'チャットは閉じています');
+}
+
 function setChatOpen(open, save = true) {
   chatPane.hidden = false;
   chatPane.classList.toggle('collapsed', !open);
+  if (!open) setChatInfoOpen(false);
   btnChatToggle.hidden = open; // 開いている間は入力欄に重ねず、ヘッダーの × で閉じる
   btnChatToggle.setAttribute('aria-expanded', String(open));
   btnChatToggle.textContent = 'AI';
   btnChatToggle.title = 'LLMチャットを開く';
   chatResizer.setAttribute('aria-label', open ? 'チャットの高さを変更' : '上へドラッグしてチャットを開く');
+  chatResizer.title = open ? 'ドラッグまたは矢印キーで高さを変更' : '上へドラッグまたは上矢印キーでチャットを開く';
   clampFloatingControl(btnChatToggle);
   if (open) {
     if (!doc) {
@@ -1770,6 +1801,7 @@ function setChatOpen(open, save = true) {
       chatInput.focus();
     }
   }
+  updateChatResizerAria(open);
   if (save) chrome.storage.local.set({ chatOpen: open });
 }
 
@@ -1778,6 +1810,7 @@ function setChatHeight(height, save = true) {
   const max = Math.max(MIN_CHAT_HEIGHT, innerHeight - toolbarHeight - 80);
   const value = Math.max(MIN_CHAT_HEIGHT, Math.min(Number(height) || 0, max));
   chatPane.style.flexBasis = `${value}px`;
+  updateChatResizerAria(true, value);
   if (save) chrome.storage.local.set({ chatHeight: value });
 }
 
@@ -1853,15 +1886,25 @@ function makeChatResizable(initialHeight) {
     }
   });
   chatResizer.addEventListener('keydown', (event) => {
-    if (!['ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
-    if (!isChatOpen() && event.key === 'ArrowUp') {
+    if (!isChatOpen() && ['ArrowUp', 'Home', 'End'].includes(event.key)) {
       setChatOpen(true);
+      if (event.key === 'Home') setChatHeight(MIN_CHAT_HEIGHT);
+      if (event.key === 'End') setChatHeight(innerHeight);
       return;
     }
     if (!isChatOpen()) return;
     if (event.key === 'ArrowDown' && chatPane.getBoundingClientRect().height <= MIN_CHAT_HEIGHT) {
       closeChatFromResize();
+      return;
+    }
+    if (event.key === 'Home') {
+      setChatHeight(MIN_CHAT_HEIGHT);
+      return;
+    }
+    if (event.key === 'End') {
+      setChatHeight(innerHeight);
       return;
     }
     const delta = event.key === 'ArrowUp' ? 20 : -20;
@@ -1946,7 +1989,10 @@ chatForm.addEventListener('submit', (event) => {
   askLlm(question);
 });
 chatInput.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) chatForm.requestSubmit();
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && !event.isComposing) {
+    event.preventDefault();
+    chatForm.requestSubmit();
+  }
 });
 btnChatReset.addEventListener('click', resetLlmChat);
 btnChatClose.addEventListener('click', () => {
@@ -1955,8 +2001,7 @@ btnChatClose.addEventListener('click', () => {
 });
 btnChatStop.addEventListener('click', () => currentChatAbort?.abort('manual'));
 btnChatInfoToggle.addEventListener('click', () => {
-  chatInfo.hidden = !chatInfo.hidden;
-  btnChatInfoToggle.setAttribute('aria-expanded', String(!chatInfo.hidden));
+  setChatInfoOpen(chatInfo.hidden);
 });
 chatInfo.addEventListener('click', async (event) => {
   const button = event.target.closest?.('[data-chrome-page]');
@@ -1973,11 +2018,62 @@ chatInfo.addEventListener('click', async (event) => {
 });
 btnChatSettings.addEventListener('click', () => {
   const profile = chatProfile();
+  setChatInfoOpen(false);
   setToolbarOpen(true);
+  translateSettings.open = false;
   chatSettings.open = true;
   fillChatEditor(profile);
   (profile?.provider === 'chrome' ? selChatCfgProvider : inChatCfgModel).focus();
 });
+
+for (const details of [translateSettings, chatSettings]) {
+  details.addEventListener('toggle', () => {
+    if (!details.open) return;
+    for (const other of [translateSettings, chatSettings]) if (other !== details) other.open = false;
+  });
+}
+
+// 情報パネルはポップオーバー同様、外側の操作でも閉じる。
+document.addEventListener('pointerdown', (event) => {
+  if (chatInfo.hidden || chatInfo.contains(event.target) || btnChatInfoToggle.contains(event.target)) return;
+  setChatInfoOpen(false);
+});
+
+// 一時的なUIを最前面から一段ずつ閉じる。入力中のIME確定操作は奪わない。
+function handleEscape(event) {
+  if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing) return;
+
+  let handled = false;
+  if (!chatInfo.hidden) {
+    setChatInfoOpen(false, true);
+    handled = true;
+  } else {
+    const openSettings = [translateSettings, chatSettings].filter((details) => details.open);
+    if (openSettings.length) {
+      const focused = openSettings.find((details) => details.contains(document.activeElement));
+      const details = focused || openSettings.at(-1);
+      details.open = false;
+      details.querySelector('summary')?.focus();
+      handled = true;
+    } else if (!toolbar.hidden) {
+      setToolbarOpen(false);
+      btnToolbarToggle.focus();
+      handled = true;
+    } else if (isChatOpen()) {
+      currentChatAbort?.abort('close');
+      setChatOpen(false);
+      btnChatToggle.focus();
+      handled = true;
+    }
+  }
+
+  if (handled) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}
+
+document.addEventListener('keydown', handleEscape);
 selChatProfile.addEventListener('change', async () => {
   if (chatBusy) {
     selChatProfile.value = activeChatProfileId;
@@ -2047,7 +2143,8 @@ addEventListener('pagehide', () => {
   addEventListener('resize', () => {
     clampFloatingControl(btnToolbarToggle);
     clampFloatingControl(btnChatToggle);
-    if (chatPane.style.flexBasis) setChatHeight(chatPane.getBoundingClientRect().height, false);
+    if (isChatOpen() && chatPane.style.flexBasis) setChatHeight(chatPane.getBoundingClientRect().height, false);
+    else updateChatResizerAria(isChatOpen());
   });
 
   if (Array.isArray(stored.profiles) && stored.profiles.length) {
