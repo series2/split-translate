@@ -117,6 +117,55 @@ Microsoft の翻訳専用API（v3.0）です。こちらもモデル名や指示
 
 content.js と viewer.js 側の両方で、スクロール連動・モデル設定・プロファイル切り替えのロジックが動いています。詳しい設計意図は各ファイル冒頭のコメントを参照してください。
 
+## 配布用 ZIP の作成と公開
+
+Python 3.9 以降で、リポジトリのルートから実行します。
+
+```sh
+python3 scripts/package.py
+```
+
+`manifest.json` のバージョンを使って、`dist/split-translate-<version>.zip` と
+`dist/split-translate-<version>.zip.sha256` を生成します。
+ZIP には実行に必要なファイルと LICENSE だけを含め、`manifest.json` を ZIP の直下に配置します。
+`.git`、開発用スクリプト、README、OS の隠しファイルは含みません。
+実行用ファイルを追加したときは `scripts/package.py` の `FILES` も更新してください。
+
+### GitHub Actions による公開（推奨）
+
+`.github/workflows/release.yml` は `v*` タグを push したときだけ実行されます。
+通常のブランチへの push や PR ではリリースを作成しません。
+タグ名と `manifest.json` のバージョンが一致することを確認し、ZIP と SHA-256 を生成・検証して GitHub Release に添付します。
+認証には GitHub Actions の `GITHUB_TOKEN` を使用するため、個人トークンの登録は不要です。
+同じタグのリリースがすでに存在する場合は失敗し、公開済みの添付ファイルを上書きしません。
+
+公開手順:
+
+1. `manifest.json` のバージョンを更新し、動作確認したソース・配布スクリプト・ワークフローをコミットして GitHub に push します。
+2. 公開するコミットにタグを付けて push します（以下は `3.10.0` の例です）。
+
+   ```sh
+   git tag v3.10.0
+   git push origin v3.10.0
+   ```
+
+3. GitHub の Actions で `Release extension` の成功を確認し、Releases から作成されたリリースを開きます。
+4. リリースに添付した ZIP と `.sha256` を同じフォルダへダウンロードし、そのフォルダで次を実行して `OK` を確認します（ファイル名は実際のバージョンに置き換えます）。
+
+   ```sh
+   shasum -a 256 -c split-translate-3.10.0.zip.sha256
+   ```
+
+5. ダウンロードした **その ZIP を再圧縮せずに** Chrome ウェブストアの開発者ダッシュボードへアップロードします。
+
+GitHub が自動生成する `Source code (zip)` ではなく、自分で添付した ZIP を使います。
+これで GitHub で配布する ZIP とストアに提出する ZIP をバイト単位で同一にできます。
+ストアからインストールされるパッケージには Google による署名などが加わるため、提出 ZIP 自体とは区別してください。
+ストアの公開には、別途ストア掲載情報・プライバシー情報の入力と審査が必要です。
+この CI は GitHub Release の公開までを行い、Chrome ウェブストアへのアップロードは手動です。
+アップロードに失敗して下書きリリースが残った場合は、添付ファイルの状態を確認してください。
+再実行するには未公開の下書きを削除してから Actions の失敗した実行を再実行します。公開済みリリースの修正には新しいバージョンとタグを使います。
+
 ## ライセンス
 
 [MIT License](LICENSE)
