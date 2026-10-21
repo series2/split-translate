@@ -140,8 +140,10 @@ const selChatProfile = $('#chat-profile');
 const selSl = $('#sl');
 const selTl = $('#tl');
 const chkSync = $('#sync');
+const inExtractionMaxBlocks = $('#extraction-max-blocks');
 const statusEl = $('#status');
 const noticeEl = $('#notice');
+const extractionWarningEl = $('#extraction-warning');
 const progressEl = $('#progress');
 const btnPause = $('#pause');
 const selProfile = $('#profile');
@@ -896,6 +898,8 @@ function showEmpty(message) {
   titleEl.removeAttribute('href');
   statusEl.textContent = '';
   setNotice('');
+  extractionWarningEl.hidden = true;
+  extractionWarningEl.textContent = '';
   progressEl.classList.remove('active');
 }
 
@@ -1339,6 +1343,21 @@ async function applyDoc(d) {
     return;
   }
   doc = d;
+  const extraction = d.extraction || {};
+  if (extraction.truncatedBy === 'blocks') {
+    extractionWarningEl.textContent =
+      `本文が抽出上限の${Number(extraction.maxBlocks).toLocaleString()}ブロックに達したため、後半は未抽出です。` +
+      '上限を増やし、元ページで拡張機能アイコンをもう一度クリックしてください。';
+    extractionWarningEl.hidden = false;
+  } else if (extraction.truncatedBy === 'characters') {
+    extractionWarningEl.textContent =
+      `本文が安全上限の${Number(extraction.maxChars).toLocaleString()}文字に達したため、後半は未抽出です。`;
+    extractionWarningEl.hidden = false;
+  } else {
+    extractionWarningEl.hidden = true;
+    extractionWarningEl.textContent = '';
+  }
+  if (!extractionWarningEl.hidden && toolbar.hidden) setToolbarOpen(true, false);
   switchChatDomain(d);
   curStore = [];
   stateArr = d.blocks.map(() => 'pending');
@@ -1769,7 +1788,14 @@ btnChatCfgDelete.addEventListener('click', async () => {
 // ---------------------------------------------------------------------------
 // 起動
 // ---------------------------------------------------------------------------
-const savePrefs = () => chrome.storage.local.set({ source: selSl.value, target: selTl.value, sync: chkSync.checked });
+const normalizedExtractionMaxBlocks = () => Math.max(100, Math.min(10000, Math.round(Number(inExtractionMaxBlocks.value) || 5000)));
+const savePrefs = () =>
+  chrome.storage.local.set({
+    source: selSl.value,
+    target: selTl.value,
+    sync: chkSync.checked,
+    extractionMaxBlocks: normalizedExtractionMaxBlocks(),
+  });
 
 function setToolbarOpen(open, save = true) {
   toolbar.hidden = !open;
@@ -2116,6 +2142,11 @@ selChatProfile.addEventListener('change', async () => {
 selSl.addEventListener('change', () => (savePrefs(), translateAll(true)));
 selTl.addEventListener('change', () => (savePrefs(), translateAll()));
 chkSync.addEventListener('change', savePrefs);
+inExtractionMaxBlocks.addEventListener('change', () => {
+  inExtractionMaxBlocks.value = normalizedExtractionMaxBlocks();
+  savePrefs();
+  statusEl.textContent = '抽出上限は次回のページ抽出から反映されます';
+});
 $('#retry').addEventListener('click', () => translateAll(true));
 
 addEventListener('pagehide', () => {
@@ -2131,6 +2162,7 @@ addEventListener('pagehide', () => {
     source: 'auto',
     target: 'Japanese',
     sync: true,
+    extractionMaxBlocks: 5000,
     toolbarOpen: false,
     chatOpen: false,
     toolbarButtonPosition: null,
@@ -2145,6 +2177,7 @@ addEventListener('pagehide', () => {
   if (!selSl.value) selSl.value = 'auto';
   selTl.value = stored.target;
   chkSync.checked = stored.sync;
+  inExtractionMaxBlocks.value = Math.max(100, Math.min(10000, Math.round(Number(stored.extractionMaxBlocks) || 5000)));
   makeChatResizable(stored.chatHeight);
   makeFloatingControlDraggable(
     btnToolbarToggle,

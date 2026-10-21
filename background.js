@@ -16,13 +16,14 @@ async function flashBadge(tabId, text) {
 async function extractAndStore(tab) {
   const tabId = tab.id;
   try {
+    const { extractionMaxBlocks = 5000 } = await chrome.storage.local.get('extractionMaxBlocks');
     await chrome.scripting.insertCSS({ target: { tabId }, files: ['content.css'] });
     await chrome.scripting.executeScript({ target: { tabId }, files: ['compose.js', 'scrollsync.js', 'content.js'] });
     const id = crypto.randomUUID();
     const [injection] = await chrome.scripting.executeScript({
       target: { tabId },
-      func: (docId) => window.__splitTranslate.extract(docId),
-      args: [id],
+      func: (docId, options) => window.__splitTranslate.extract(docId, options),
+      args: [id, { maxBlocks: extractionMaxBlocks }],
     });
     const doc = injection?.result;
     if (!doc || doc.blocks.length === 0) {

@@ -24,6 +24,9 @@
           <select id="profile"></select>
         </label>
         <label class="check"><input type="checkbox" id="sync" checked />スクロール同期</label>
+        <label title="次に拡張機能アイコンからページを抽出するときに反映されます">抽出上限
+          <input id="extraction-max-blocks" class="compact-number" type="number" min="100" max="10000" step="100" inputmode="numeric" />
+        </label>
         <button id="pause" type="button" title="翻訳処理を一時停止">一時停止</button>
         <button id="retry" type="button" title="ページ全体を再翻訳">再翻訳</button>
       </div>
@@ -31,6 +34,7 @@
         <span id="status" class="status" aria-live="polite"></span>
       </div>
       <div id="notice" class="notice" role="alert" hidden></div>
+      <div id="extraction-warning" class="extraction-warning" role="status" hidden></div>
       <details id="translate-settings" class="settings">
         <summary>翻訳モデル設定を編集</summary>
         <label>名前 <input id="cfg-name" type="text" spellcheck="false" /></label>

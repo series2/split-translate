@@ -15,7 +15,8 @@
   const STRUCT_SEL = 'ul,ol,table,thead,tbody,tfoot,tr,section,article,header,footer,nav,aside,main,form,fieldset,figure,details,dl,pre,address,menu,hgroup';
   const EXCLUDE_SEL =
     'nav,footer,aside,script,style,noscript,form,textarea,[role=navigation],[role=banner],[role=contentinfo],[aria-hidden=true]';
-  const MAX_BLOCKS = 600;
+  const DEFAULT_MAX_BLOCKS = 5000;
+  const HARD_MAX_BLOCKS = 10000;
   const MAX_CHARS = 250000;
 
   let docId = null;
@@ -39,7 +40,7 @@
   // -------------------------------------------------------------------------
   // 抽出
   // -------------------------------------------------------------------------
-  function extract(id) {
+  function extract(id, options = {}) {
     setHighlight(null);
     docId = id;
     elems = [];
@@ -50,11 +51,16 @@
     // その場合「本文（記事）」と「クイズ／タスク一覧」のように文字数の偏った兄弟セクションがあると、
     // 少ない方が丸ごと対象外になってしまう（EXCLUDE_SEL で nav/footer/aside 等は別途除外している）。
     const root = document.body;
+    const requestedMaxBlocks = Number(options.maxBlocks);
+    const maxBlocks = Math.max(
+      100,
+      Math.min(HARD_MAX_BLOCKS, Number.isFinite(requestedMaxBlocks) ? Math.round(requestedMaxBlocks) : DEFAULT_MAX_BLOCKS)
+    );
 
     const blocks = [];
     let chars = 0;
+    let truncatedBy = '';
     for (const el of root.querySelectorAll(BLOCK_SEL)) {
-      if (blocks.length >= MAX_BLOCKS || chars >= MAX_CHARS) break;
       if (el.closest(EXCLUDE_SEL)) continue;
       const header = el.closest('header');
       if (header && !header.closest('article, main')) continue;
@@ -65,6 +71,15 @@
       const tag = el.tagName.toLowerCase();
       if (!/\p{L}/u.test(text)) continue;
       if (GENERIC_TAGS.has(tag) ? text.length < 15 : text.length < 2) continue;
+      // 実際に抽出対象となる次のブロックが存在するときだけ「上限到達」と判定する。
+      if (blocks.length >= maxBlocks) {
+        truncatedBy = 'blocks';
+        break;
+      }
+      if (chars >= MAX_CHARS) {
+        truncatedBy = 'characters';
+        break;
+      }
 
       // 訳文を元の構造（リンク・画像など）に差し込むための情報（compose.js）。
       //   m: plain | parts | marks / w: 囲み要素の文言（複製側で構造が一致するかの確認に使う）
@@ -85,7 +100,14 @@
     }
 
     computeScrollInfo();
-    return { id, title: document.title, url: location.href, lang: document.documentElement.lang || '', blocks };
+    return {
+      id,
+      title: document.title,
+      url: location.href,
+      lang: document.documentElement.lang || '',
+      blocks,
+      extraction: { maxBlocks, maxChars: MAX_CHARS, chars, truncatedBy },
+    };
   }
 
   window.__splitTranslate = { extract };

@@ -150,6 +150,7 @@ body {
 }
 
 .bar select,
+.bar input,
 .bar button {
   font: inherit;
   color: var(--text);
@@ -157,6 +158,10 @@ body {
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 2px 6px;
+}
+
+.bar .compact-number {
+  width: 7em;
 }
 
 .bar button {
@@ -201,6 +206,16 @@ body {
   color: var(--err);
   line-height: 1.6;
   white-space: pre-wrap;
+}
+
+.extraction-warning {
+  margin-top: 6px;
+  padding: 6px 8px;
+  color: var(--text);
+  background: color-mix(in srgb, #f59e0b 14%, var(--pane));
+  border: 1px solid color-mix(in srgb, #f59e0b 65%, var(--border));
+  border-radius: 6px;
+  line-height: 1.6;
 }
 
 .settings {
